@@ -137,6 +137,13 @@ def stylize(rgb, params, ao=None, cavity=None):
     rgb = boost_saturation_contrast(rgb, sat=p["saturation"], contrast=p["contrast"])
     if p["posterize_levels"]:
         rgb = posterize(rgb, p["posterize_levels"])
+    # Lift the black point BEFORE inking/shading so crushed shadows and unscanned
+    # dark regions become dark-grey-with-hue instead of flat black blobs (those
+    # otherwise get over-accented). Thin XDoG ink lines can still go near-black on
+    # top of the floored base, so outlines stay bold while regions stay readable.
+    floor = p["black_floor"]
+    if floor > 0.0:
+        rgb = floor + rgb * (1.0 - floor)
     if p["edge_strength"] > 0.0:
         luma = (rgb * _LUMA).sum(axis=2)
         ink = xdog_edges(luma, sigma=p["edge_sigma"], k=1.6, tau=0.98,
@@ -146,6 +153,7 @@ def stylize(rgb, params, ao=None, cavity=None):
     if ao is not None or cavity is not None:
         shade = _shading(rgb.shape[:2], ao, cavity,
                          p["ao_strength"], p["cavity_strength"])
+        shade = np.maximum(shade, p["shade_floor"])     # cap how dark shading goes
         rgb = rgb * shade[:, :, None]
     rgb = np.clip(rgb, 0.0, 1.0)
     return dpid_downscale(rgb, p["supersample"], lam=p["dpid_lambda"])
@@ -182,6 +190,8 @@ def params_from_settings(settings):
         "ao_strength": g("shading_strength", 0.6),
         "cavity_strength": g("cavity_strength", 0.6),
         "dpid_lambda": g("dpid_lambda", 1.0),
+        "black_floor": g("black_floor", 0.14),
+        "shade_floor": g("shade_floor", 0.55),
     }
 
 

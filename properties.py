@@ -23,13 +23,16 @@ def _apply_preset(self, context):
 
 # Cartoon-look presets: key -> {prop: value}. OFF disables stylization.
 _CARTOON_PRESETS = {
-    "OFF": dict(do_cartoonize=False),
+    "OFF": dict(do_cartoonize=False, black_floor=0.08),
     "SUBTLE": dict(do_cartoonize=True, smooth_iters=1, posterize_levels=0,
-                   edge_strength=0.0, saturation=1.2, contrast=1.1, cavity_strength=0.4),
+                   edge_strength=0.0, saturation=1.2, contrast=1.1,
+                   cavity_strength=0.4, black_floor=0.10),
     "CEL": dict(do_cartoonize=True, smooth_iters=2, posterize_levels=8,
-                edge_strength=0.75, saturation=1.35, contrast=1.2, cavity_strength=0.5),
+                edge_strength=0.75, saturation=1.35, contrast=1.2,
+                cavity_strength=0.5, black_floor=0.13),
     "HEAVY": dict(do_cartoonize=True, smooth_iters=2, posterize_levels=6,
-                  edge_strength=1.0, saturation=1.5, contrast=1.3, cavity_strength=0.6),
+                  edge_strength=1.0, saturation=1.4, contrast=1.2,
+                  cavity_strength=0.45, black_floor=0.15),
 }
 
 
@@ -153,10 +156,17 @@ class LoFiSettings(bpy.types.PropertyGroup):
     smooth_eps: bpy.props.FloatProperty(name="Flatten Threshold", default=0.02, min=0.001, max=0.2)
     saturation: bpy.props.FloatProperty(
         name="Saturation", description="Colour punch (1 = unchanged)",
-        default=1.5, min=0.0, soft_max=2.5, max=4.0,
+        default=1.4, min=0.0, soft_max=2.5, max=4.0,
     )
     contrast: bpy.props.FloatProperty(
-        name="Contrast", default=1.3, min=0.5, soft_max=2.0, max=3.0,
+        name="Contrast", default=1.2, min=0.5, soft_max=2.0, max=3.0,
+    )
+    black_floor: bpy.props.FloatProperty(
+        name="Lift Blacks",
+        description="Raise the darkest output so unscanned/dark regions read as "
+                    "dark-grey-with-hue instead of flat black blobs. Thin ink "
+                    "outlines still go darker on top",
+        default=0.15, min=0.0, soft_max=0.3, max=0.6,
     )
     posterize_levels: bpy.props.IntProperty(
         name="Posterize Levels",
@@ -175,7 +185,7 @@ class LoFiSettings(bpy.types.PropertyGroup):
     cavity_strength: bpy.props.FloatProperty(
         name="Cavity",
         description="Darken concave crevices (baked mesh Pointiness) so form reads",
-        default=0.6, min=0.0, max=1.0,
+        default=0.45, min=0.0, max=1.0,
     )
     dpid_lambda: bpy.props.FloatProperty(
         name="Detail Preservation",

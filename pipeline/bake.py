@@ -141,10 +141,26 @@ def run(obj, settings, context, colour, old_uv, new_uv, temp):
     if getattr(settings, "bake_shading", False):
         _bake_ao_into(context, obj, img, bake_res,
                       getattr(settings, "shading_strength", 0.9))
+    floor = getattr(settings, "black_floor", 0.0)
+    if floor > 0.0:
+        _lift_blacks(img, bake_res, floor)
     return {"albedo": img, "ao": None, "cavity": None, "res": bake_res}
 
 
-def _fill_black_holes(img, tex, thresh=0.06, iters=64):
+def _lift_blacks(img, res, floor):
+    """Raise the black point so dark/unscanned regions read as dark-grey, not
+    flat black blobs. (Cartoonize does its own lift; this is for the OFF path.)"""
+    import numpy as np
+
+    a = np.empty(res * res * 4, dtype=np.float32)
+    img.pixels.foreach_get(a)
+    a = a.reshape(-1, 4)
+    a[:, :3] = floor + a[:, :3] * (1.0 - floor)
+    img.pixels.foreach_set(a.ravel())
+    img.update()
+
+
+def _fill_black_holes(img, tex, thresh=0.085, iters=64):
     import numpy as np
 
     a = np.empty(tex * tex * 4, dtype=np.float32)
