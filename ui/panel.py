@@ -34,6 +34,18 @@ class LOFI_PT_panel(bpy.types.Panel):
         if s.bake_shading:
             col.prop(s, "shading_strength")
 
+        box = layout.box()
+        box.label(text="Stylize", icon="BRUSH_DATA")
+        box.prop(s, "cartoon_preset")
+        if s.do_cartoonize:
+            box.prop(s, "supersample")
+            box.prop(s, "saturation")
+            box.prop(s, "contrast")
+            box.prop(s, "posterize_levels")
+            box.prop(s, "edge_strength")
+            box.prop(s, "smooth_iters")
+            box.prop(s, "cavity_strength")
+
         layout.prop(s, "use_gpu")
         layout.prop(s, "output_path")
 

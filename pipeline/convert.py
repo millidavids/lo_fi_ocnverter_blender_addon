@@ -10,7 +10,7 @@ Owns the NON-NEGOTIABLE safety contract (plan §4 step 0):
 import bpy
 
 from ..utils.scene_state import SceneState
-from . import bake, decimate, heal, material, normalize, pixelate, prep
+from . import bake, cartoonize, decimate, heal, material, normalize, pixelate, prep
 from . import export as export_mod
 from . import uv as uv_mod
 from . import watertight
@@ -24,18 +24,26 @@ class ConvertError(Exception):
 class TempData:
     """Tracks transient datablocks created during a run so they can be purged.
 
-    NB: the baked image and the final material are NOT temp — they belong to the
-    delivered clone and must persist. Only the per-slot emission bake materials
-    are transient (the final material replaces them, orphaning them)."""
+    NB: the delivered texture and final material are NOT temp — they belong to the
+    clone and must persist. Transient = the per-slot emission bake materials, and
+    (in cartoonize mode) the supersampled albedo + AO + cavity aux images that the
+    final downscaled texture replaces."""
 
     def __init__(self):
         self.materials = []
+        self.images = []
 
     def purge(self):
         for m in self.materials:
             try:
                 if m.name in bpy.data.materials:
                     bpy.data.materials.remove(m)
+            except Exception:  # noqa: BLE001
+                pass
+        for im in self.images:
+            try:
+                if im.name in bpy.data.images:
+                    bpy.data.images.remove(im)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -102,7 +110,16 @@ def convert(context, source_obj, settings):
             normalize.run(clone, settings, context)
 
         old_uv, new_uv = uv_mod.run(clone, settings, context)
-        image = bake.run(clone, settings, context, colour, old_uv, new_uv, temp)
+        baked = bake.run(clone, settings, context, colour, old_uv, new_uv, temp)
+        image = baked["albedo"]
+        if getattr(settings, "do_cartoonize", False):
+            # Abstract + amplify the supersampled albedo, then detail-preservingly
+            # downscale to tex_size. The hi-res albedo becomes temp; the new
+            # tex_size image is the deliverable texture.
+            image = cartoonize.run(
+                baked["albedo"], settings, settings.tex_size,
+                ao_img=baked["ao"], cavity_img=baked["cavity"], temp=temp)
+            temp.images.append(baked["albedo"])
         if settings.do_pixelate:
             pixelate.run(image, settings)
         material.run(clone, settings, context, image, temp)

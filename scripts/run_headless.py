@@ -69,6 +69,13 @@ def main():
     p.add_argument("--no-pixelate", action="store_true")
     p.add_argument("--no-shading", action="store_true", help="skip baked-AO shading")
     p.add_argument("--no-gpu", action="store_true")
+    p.add_argument("--cartoon-preset", choices=["OFF", "SUBTLE", "CEL", "HEAVY"],
+                   help="stylize preset (default HEAVY)")
+    p.add_argument("--no-cartoonize", action="store_true")
+    p.add_argument("--saturation", type=float)
+    p.add_argument("--edge", type=float, help="ink-outline strength 0..1")
+    p.add_argument("--posterize", type=int)
+    p.add_argument("--supersample", type=int)
     p.add_argument("--render-geo")
     p.add_argument("--render-tex")
     args = p.parse_args(argv)
@@ -95,6 +102,21 @@ def main():
     s.do_pixelate = not args.no_pixelate
     s.bake_shading = not args.no_shading
     s.use_gpu = not args.no_gpu
+
+    # Stylize: set the preset FIRST (its update callback applies the bundle),
+    # then apply any explicit overrides on top.
+    if args.cartoon_preset is not None:
+        s.cartoon_preset = args.cartoon_preset
+    if args.no_cartoonize:
+        s.do_cartoonize = False
+    if args.saturation is not None:
+        s.saturation = args.saturation
+    if args.edge is not None:
+        s.edge_strength = args.edge
+    if args.posterize is not None:
+        s.posterize_levels = args.posterize
+    if args.supersample is not None:
+        s.supersample = args.supersample
 
     convert_mod = importlib.import_module(addon.__name__ + ".pipeline.convert")
     result = convert_mod.convert(bpy.context, mesh, s)

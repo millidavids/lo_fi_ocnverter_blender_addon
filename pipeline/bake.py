@@ -74,9 +74,12 @@ def run(obj, settings, context, colour, old_uv, new_uv, temp):
     mesh.uv_layers.active = mesh.uv_layers[new_uv]   # bake destination layout
 
     tex = max(16, settings.tex_size)
-    # The baked image is part of the delivered clone (its final material samples
-    # it, and it's embedded on export) — NOT a temp datablock, so don't track it.
-    img = bpy.data.images.new("lofi_bake", tex, tex, alpha=True)
+    # In cartoonize mode we bake at a SUPERSAMPLED resolution and let cartoonize
+    # abstract + detail-preservingly downscale to tex_size; otherwise bake direct.
+    cartoon = getattr(settings, "do_cartoonize", False)
+    ss = max(1, int(getattr(settings, "supersample", 4))) if cartoon else 1
+    bake_res = min(1024, tex * ss)
+    img = bpy.data.images.new("lofi_bake", bake_res, bake_res, alpha=True)
 
     if colour.kind == prep.ColourSource.MATERIAL and len(obj.material_slots) > 0:
         # Capture per-slot sources BEFORE we overwrite the slots.
@@ -110,22 +113,35 @@ def run(obj, settings, context, colour, old_uv, new_uv, temp):
     # islands, so NEAREST sampling at seams doesn't pick up the black atlas
     # background (a generous margin matters on a small, many-island atlas).
     bake_settings.margin_type = "EXTEND"
-    bake_settings.margin = max(8, tex // 8)
+    bake_settings.margin = max(8, bake_res // 8)
     bake_settings.use_clear = True
     bake_settings.use_selected_to_active = False
 
-    print(f"lofi.bake: EMIT {tex}px on device {device}, source={colour.kind}")
+    print(f"lofi.bake: EMIT {bake_res}px on device {device}, source={colour.kind}")
     context.scene.cycles.samples = 1
     bpy.ops.object.bake(type="EMIT")
 
     # Heal near-black holes: regions the photogrammetry never saw (e.g. a cut
     # end, the underside) have NO source texture and bake to flat black. Inpaint
-    # them with surrounding colour so they don't read as blank-spot errors.
-    _fill_black_holes(img, tex)
+    # them with surrounding colour. Iters must scale with resolution or big holes
+    # stay black-cored (then DPID amplifies them into dark rings).
+    _fill_black_holes(img, bake_res, iters=max(64, bake_res // 4))
 
+    if cartoon:
+        # Bake AO + cavity (Pointiness) as SEPARATE maps for cartoonize to use as
+        # feature-popping shading (no multiply here). Order: AO before cavity,
+        # because the cavity bake replaces the material slots.
+        ao = _bake_ao_map(context, obj, bake_res, temp) if getattr(
+            settings, "bake_shading", True) else None
+        cavity = _bake_pointiness(context, obj, bake_res, temp) if getattr(
+            settings, "cavity_strength", 0.0) > 0.0 else None
+        return {"albedo": img, "ao": ao, "cavity": cavity, "res": bake_res}
+
+    # Legacy (no cartoonize): optional AO multiplied straight into the albedo.
     if getattr(settings, "bake_shading", False):
-        _bake_ao_into(context, obj, img, tex, getattr(settings, "shading_strength", 0.9))
-    return img
+        _bake_ao_into(context, obj, img, bake_res,
+                      getattr(settings, "shading_strength", 0.9))
+    return {"albedo": img, "ao": None, "cavity": None, "res": bake_res}
 
 
 def _fill_black_holes(img, tex, thresh=0.06, iters=64):
@@ -161,28 +177,73 @@ def _fill_black_holes(img, tex, thresh=0.06, iters=64):
     print(f"lofi.bake: inpainted {n0} near-black hole texels")
 
 
-def _bake_ao_into(context, obj, img, tex, strength):
-    """Bake ambient occlusion and multiply it into `img`, so the unlit asset
-    still reads as 3D form (an authentic PS1 'baked lighting' move)."""
-    import numpy as np
-
-    ao_img = bpy.data.images.new("lofi_ao", tex, tex, alpha=False)
-    # Re-point every material's active (bake-target) node at the AO image.
+def _bake_ao_map(context, obj, res, temp):
+    """Bake ambient occlusion into a NEW image (retargeting the materials' active
+    bake-target node). Returns the AO image (tracked as temp)."""
+    ao_img = bpy.data.images.new("lofi_ao", res, res, alpha=False)
+    if temp is not None:
+        temp.images.append(ao_img)
     for slot in obj.material_slots:
         nt = slot.material.node_tree
         if nt and nt.nodes.active and nt.nodes.active.type == "TEX_IMAGE":
             nt.nodes.active.image = ao_img
-
     context.scene.cycles.samples = 16          # AO needs a few samples to smooth
+    context.scene.render.bake.margin_type = "EXTEND"
     bpy.ops.object.bake(type="AO")
+    return ao_img
 
-    col = np.empty(tex * tex * 4, dtype=np.float32)
+
+def _bake_pointiness(context, obj, res, temp):
+    """Bake mesh cavity/curvature via Geometry > Pointiness (concave<0.5<convex).
+
+    Pointiness clusters near 0.4, so a ColorRamp expands the useful band. A single
+    geometric material on all slots suffices (pointiness is per-vertex, slot-
+    independent), and material.py replaces the slots afterward anyway."""
+    img = bpy.data.images.new("lofi_cavity", res, res, alpha=False)
+    mat = bpy.data.materials.new("lofi_cavity_mat")
+    if temp is not None:
+        temp.images.append(img)
+        temp.materials.append(mat)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    nt.nodes.clear()
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    emit = nt.nodes.new("ShaderNodeEmission")
+    geo = nt.nodes.new("ShaderNodeNewGeometry")
+    ramp = nt.nodes.new("ShaderNodeValToRGB")
+    ramp.color_ramp.elements[0].position = 0.30     # expand the ~0.4 cluster
+    ramp.color_ramp.elements[1].position = 0.55
+    nt.links.new(geo.outputs["Pointiness"], ramp.inputs["Fac"])
+    nt.links.new(ramp.outputs["Color"], emit.inputs["Color"])
+    nt.links.new(emit.outputs["Emission"], out.inputs["Surface"])
+    tgt = nt.nodes.new("ShaderNodeTexImage")
+    tgt.image = img
+    for n in nt.nodes:
+        n.select = False
+    tgt.select = True
+    nt.nodes.active = tgt
+
+    obj.data.materials.clear()
+    obj.data.materials.append(mat)
+    for p in obj.data.polygons:
+        p.material_index = 0
+    context.scene.cycles.samples = 1
+    bpy.ops.object.bake(type="EMIT")
+    return img
+
+
+def _bake_ao_into(context, obj, img, res, strength):
+    """Legacy path: bake AO and multiply it straight into the albedo `img`."""
+    import numpy as np
+
+    ao_img = _bake_ao_map(context, obj, res, None)   # not tracked; removed below
+    col = np.empty(res * res * 4, dtype=np.float32)
     img.pixels.foreach_get(col)
     col = col.reshape(-1, 4)
-    aob = np.empty(tex * tex * 4, dtype=np.float32)
+    aob = np.empty(res * res * 4, dtype=np.float32)
     ao_img.pixels.foreach_get(aob)
-    ao = aob.reshape(-1, 4)[:, 0]                 # AO is greyscale
-    ao = 1.0 - strength * (1.0 - ao)              # dial strength 0..1
+    ao = aob.reshape(-1, 4)[:, 0]
+    ao = 1.0 - strength * (1.0 - ao)
     col[:, :3] *= ao[:, None]
     img.pixels.foreach_set(col.ravel())
     img.update()
