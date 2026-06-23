@@ -118,7 +118,8 @@ def convert(context, source_obj, settings):
             # tex_size image is the deliverable texture.
             image = cartoonize.run(
                 baked["albedo"], settings, settings.tex_size,
-                ao_img=baked["ao"], cavity_img=baked["cavity"], temp=temp)
+                ao_img=baked["ao"], cavity_img=baked["cavity"], temp=temp,
+                structure_done=baked.get("structure_cartoonized", False))
             temp.images.append(baked["albedo"])
         if settings.do_pixelate:
             pixelate.run(image, settings)

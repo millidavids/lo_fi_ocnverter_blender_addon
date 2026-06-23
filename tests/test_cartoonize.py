@@ -102,6 +102,44 @@ def test_stylize_outputs_target_size():
     assert out.min() >= 0.0 and out.max() <= 1.0
 
 
+def test_cartoonize_structure_no_colour_manufacture():
+    rng = np.random.RandomState(5)
+    base = 0.5 + 0.05 * rng.randn(48, 48, 1)
+    rgb = np.clip(np.repeat(base, 3, axis=2) + 0.02 * rng.randn(48, 48, 3),
+                  0, 1).astype(np.float32)
+    out = ct.cartoonize_structure(rgb, ct.params_from_settings(object()))
+    assert out.shape == rgb.shape
+    assert out.min() >= 0.0 and out.max() <= 1.0
+    # STRUCTURE has no saturation step, so a near-grey source stays near-grey
+    assert ct.colourfulness(out) < 0.15, ct.colourfulness(out)
+
+
+def test_grade_finish_chroma_adaptive():
+    params = ct.params_from_settings(object())
+    params["supersample"] = 1                      # no downscale; same size out
+    mono = np.full((16, 16, 3), 0.5, dtype=np.float32)
+    out_m = ct.grade_finish(mono.copy(), params)
+    assert ct.colourfulness(out_m) < 0.1           # monochrome stays monochrome
+    col = np.zeros((16, 16, 3), dtype=np.float32)
+    col[:, :, 0] = 0.8
+    col[:, :, 1] = 0.2
+    out_c = ct.grade_finish(col.copy(), params)
+    assert ct.colourfulness(out_c) > 0.2           # colourful keeps/gets colour
+
+
+def test_cf_routing_depends_on_hole_fill():
+    # A sparse atlas (mostly black background + a small colour island) reads as
+    # cf~0 -> mono routing, which would WRONGLY desaturate a colourful object.
+    # This documents WHY _fill_black_holes must flood object colour across the
+    # background BEFORE grade_finish measures cf.
+    sparse = np.zeros((32, 32, 3), dtype=np.float32)
+    sparse[14:18, 14:18, 0] = 0.9                  # tiny red island, rest black
+    assert ct.colourfulness(sparse) < 0.04         # would mis-route to mono
+    filled = np.zeros((32, 32, 3), dtype=np.float32)
+    filled[:, :, 0] = 0.9                          # object colour flooded everywhere
+    assert ct.colourfulness(filled) > 0.15         # correct colourful routing
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

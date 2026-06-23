@@ -81,14 +81,25 @@ def run(obj, settings, context, colour, old_uv, new_uv, temp):
     bake_res = min(1024, tex * ss)
     img = bpy.data.images.new("lofi_bake", bake_res, bake_res, alpha=True)
 
+    structure_cartoonized = False
     if colour.kind == prep.ColourSource.MATERIAL and len(obj.material_slots) > 0:
         # Capture per-slot sources BEFORE we overwrite the slots.
         slot_sources = [
             (prep.base_color_image(slot.material), _solid_color(slot.material))
             for slot in obj.material_slots
         ]
+        cart_params = None
+        if cartoon:
+            from . import cartoonize
+            cart_params = cartoonize.params_from_settings(settings)
         for i, (src_img, col) in enumerate(slot_sources):
             if src_img is not None and old_uv is not None:
+                if cartoon:
+                    # DECOUPLE: lo-fi the material in its coherent source space first
+                    # (a copy), so the cartoon cells come from the image, not the
+                    # low-poly triangles. The post-bake cartoonize.run then GRADE-only.
+                    src_img = cartoonize.cartoonize_source_copy(src_img, cart_params, temp)
+                    structure_cartoonized = True
                 mat = _build_emission_material(
                     f"lofi_emit_{i}", img, temp, source_img=src_img, old_uv=old_uv)
             else:
@@ -135,7 +146,8 @@ def run(obj, settings, context, colour, old_uv, new_uv, temp):
             settings, "bake_shading", True) else None
         cavity = _bake_pointiness(context, obj, bake_res, temp) if getattr(
             settings, "cavity_strength", 0.0) > 0.0 else None
-        return {"albedo": img, "ao": ao, "cavity": cavity, "res": bake_res}
+        return {"albedo": img, "ao": ao, "cavity": cavity, "res": bake_res,
+                "structure_cartoonized": structure_cartoonized}
 
     # Legacy (no cartoonize): optional AO multiplied straight into the albedo.
     if getattr(settings, "bake_shading", False):
@@ -144,7 +156,8 @@ def run(obj, settings, context, colour, old_uv, new_uv, temp):
     floor = getattr(settings, "black_floor", 0.0)
     if floor > 0.0:
         _lift_blacks(img, bake_res, floor)
-    return {"albedo": img, "ao": None, "cavity": None, "res": bake_res}
+    return {"albedo": img, "ao": None, "cavity": None, "res": bake_res,
+            "structure_cartoonized": False}
 
 
 def _lift_blacks(img, res, floor):

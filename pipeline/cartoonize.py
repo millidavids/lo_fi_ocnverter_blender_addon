@@ -144,19 +144,34 @@ def colourfulness(rgb):
     return float(np.median(rgb.max(axis=2) - rgb.min(axis=2)))
 
 
-def stylize(rgb, params, ao=None, cavity=None):
-    """Full cartoon chain on an (H,W,3) float array. Returns (tex,tex,3).
-
-    CHROMA-ADAPTIVE: monochrome subjects (stone, marble) get NO saturation boost
-    (so capture-lighting tints + noise aren't amplified into false-colour blotches)
-    and lean on baked form-shading instead; colourful subjects get the full punch."""
+def cartoonize_structure(rgb, params):
+    """Image-driven cartoon STRUCTURE (run in the coherent SOURCE space, pre-bake):
+    flatten into cartoon cells + posterize tone + XDoG ink. NO saturation, black-floor,
+    shading or downscale, and NO cf measurement (the source copy still contains scan
+    background / colour-charts that would mis-route chroma)."""
     p = params
     rgb = guided_smooth(rgb, sigma=p["smooth_sigma"], eps=p["smooth_eps"],
                         iters=p["smooth_iters"])
+    if p["posterize_levels"]:
+        rgb = posterize_value(rgb, p["posterize_levels"])   # hue-preserving
+    if p["edge_strength"] > 0.0:
+        luma = (rgb * _LUMA).sum(axis=2)
+        ink = xdog_edges(luma, sigma=p["edge_sigma"], k=1.6, tau=0.98,
+                         eps=p["edge_eps"], phi=p["edge_phi"])
+        ink = 1.0 - p["edge_strength"] * (1.0 - ink)    # scale line darkness
+        rgb = rgb * ink[:, :, None]
+    return np.clip(rgb, 0.0, 1.0)
 
+
+def grade_finish(rgb, params, ao=None, cavity=None):
+    """Post-bake GRADE on the (hole-filled, object-dominated) atlas: chroma-adaptive
+    colour grade + black-floor + mesh form-shading + detail-preserving downscale.
+
+    These are per-pixel ops, so they do NOT re-introduce triangle-coupling, and cf is
+    measured here on the filled atlas (object-colour-dominated; hole-fill must precede)."""
+    p = params
     # 0 (monochrome) .. 1 (colourful)
     cf = np.clip((colourfulness(rgb) - 0.04) / (0.18 - 0.04), 0.0, 1.0)
-    # mono -> mono_saturation (desaturate noise); colourful -> full saturation
     eff_sat = (1.0 - cf) * p["mono_saturation"] + cf * p["saturation"]
     eff_cavity = min(1.0, p["cavity_strength"] + (1.0 - cf) * p["mono_form_boost"])
     eff_ao = min(1.0, p["ao_strength"] + (1.0 - cf) * p["mono_form_boost"])
@@ -164,27 +179,21 @@ def stylize(rgb, params, ao=None, cavity=None):
           f"eff_sat={eff_sat:.2f} eff_cavity={eff_cavity:.2f}")
 
     rgb = boost_saturation_contrast(rgb, sat=eff_sat, contrast=p["contrast"])
-    if p["posterize_levels"]:
-        rgb = posterize_value(rgb, p["posterize_levels"])   # hue-preserving
-    # Lift the black point BEFORE inking/shading so crushed shadows and unscanned
-    # dark regions become dark-grey-with-hue instead of flat black blobs (those
-    # otherwise get over-accented). Thin XDoG ink lines can still go near-black on
-    # top of the floored base, so outlines stay bold while regions stay readable.
     floor = p["black_floor"]
-    if floor > 0.0:
+    if floor > 0.0:                       # lift dark regions to dark-grey-with-hue
         rgb = floor + rgb * (1.0 - floor)
-    if p["edge_strength"] > 0.0:
-        luma = (rgb * _LUMA).sum(axis=2)
-        ink = xdog_edges(luma, sigma=p["edge_sigma"], k=1.6, tau=0.98,
-                         eps=p["edge_eps"], phi=p["edge_phi"])
-        ink = 1.0 - p["edge_strength"] * (1.0 - ink)    # scale line darkness
-        rgb = rgb * ink[:, :, None]
     if ao is not None or cavity is not None:
         shade = _shading(rgb.shape[:2], ao, cavity, eff_ao, eff_cavity)
         shade = np.maximum(shade, p["shade_floor"])     # cap how dark shading goes
         rgb = rgb * shade[:, :, None]
     rgb = np.clip(rgb, 0.0, 1.0)
     return dpid_downscale(rgb, p["supersample"], lam=p["dpid_lambda"])
+
+
+def stylize(rgb, params, ao=None, cavity=None):
+    """Full chain (structure + grade) on one array — used for vertex/solid sources,
+    which have no coherent source texture to pre-cartoonize (NOT decoupled)."""
+    return grade_finish(cartoonize_structure(rgb, params), params, ao=ao, cavity=cavity)
 
 
 # --------------------------------------------------------------------------- #
@@ -224,20 +233,56 @@ def params_from_settings(settings):
         # lean harder on baked form-shading so the sculpted form carries identity.
         "mono_saturation": g("mono_saturation", 0.6),
         "mono_form_boost": g("mono_form_boost", 0.3),
+        "source_res": int(g("source_res", 1024)),
     }
 
 
-def run(albedo_img, settings, out_size, ao_img=None, cavity_img=None, temp=None):
-    """Stylize the supersampled `albedo_img` and write the result into a NEW
-    `out_size` image (pixelate.run reads image.size, so the downscaled result must
-    be its own target-size datablock). Returns the new image."""
+def cartoonize_source_copy(image, params, temp):
+    """Lo-fi the MATERIAL in its own coherent space, decoupled from the mesh.
+
+    COPY the source image (never mutate the user's scan), sever its on-disk link so a
+    stray reload/save-modified can't clobber the original, scale the copy down for
+    speed+coherence, apply the cartoon STRUCTURE, and return it. The bake then samples
+    this coherent cartoon through the low-poly UVs (cells come from the image, not the
+    triangles)."""
+    copy = image.copy()
+    copy.name = "lofi_src_" + image.name
+    # Sever the on-disk link ONLY for unpacked file-backed copies, so a stray
+    # reload/save can't clobber the user's texture. Packed/generated images have no
+    # external file (severing them just warns), so leave them alone.
+    if copy.source == "FILE" and copy.packed_file is None:
+        copy.filepath_raw = ""
+    if temp is not None:
+        temp.images.append(copy)
+    res = params["source_res"]
+    w, h = copy.size
+    if max(w, h) > res:
+        copy.scale(res, res)
+    a = _read_rgba(copy)
+    a[:, :, :3] = cartoonize_structure(a[:, :, :3], params)
+    copy.pixels.foreach_set(a.ravel())
+    copy.update()
+    print(f"lofi.cartoonize: source '{image.name}' -> coherent cartoon {copy.size[0]}px")
+    return copy
+
+
+def run(albedo_img, settings, out_size, ao_img=None, cavity_img=None, temp=None,
+        structure_done=False):
+    """Finish the supersampled `albedo_img` into a NEW `out_size` image (pixelate.run
+    reads image.size, so the downscaled result must be its own target-size datablock).
+
+    `structure_done=True` (image source already cartoonized coherently in bake): apply
+    GRADE only. Otherwise (vertex/solid baked raw): full structure + grade. Returns the
+    new image."""
     import bpy
 
     p = params_from_settings(settings)
     p["supersample"] = max(1, albedo_img.size[0] // out_size)   # actual integer factor
 
     rgb = _read_rgba(albedo_img)[:, :, :3]
-    small = stylize(rgb, p, ao=_read_gray(ao_img), cavity=_read_gray(cavity_img))
+    ao, cavity = _read_gray(ao_img), _read_gray(cavity_img)
+    small = (grade_finish(rgb, p, ao=ao, cavity=cavity) if structure_done
+             else stylize(rgb, p, ao=ao, cavity=cavity))
 
     out = bpy.data.images.new("lofi_cartoon", out_size, out_size, alpha=True)
     rgba = np.ones((out_size, out_size, 4), dtype=np.float32)
