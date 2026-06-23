@@ -129,14 +129,13 @@ def dpid_downscale(img, factor, lam=1.0):
 # --------------------------------------------------------------------------- #
 # orchestration (pure numpy)
 # --------------------------------------------------------------------------- #
-def _shading(luma_shape, ao, cavity, ao_strength, cavity_strength):
-    shade = np.ones(luma_shape, dtype=np.float32)
-    if ao is not None:
-        shade *= (1.0 - ao_strength * (1.0 - ao))          # darken occluded
-    if cavity is not None:
-        crev = np.clip(0.5 - cavity, 0.0, 0.5) * 2.0        # 0..1 in concave
-        shade *= (1.0 - cavity_strength * crev)             # darken crevices
-    return np.clip(shade, 0.0, 1.0)
+def _normalize(gray, lo_p=3.0, hi_p=97.0):
+    """Percentile contrast-stretch a [0,1] map. The baked cavity is often crushed
+    near-flat (e.g. a serene face's shallow relief reads 0.80-1.0); stretching it
+    makes the captured features (eye sockets, nose, mouth, curls) usable."""
+    a = gray.astype(np.float32)
+    lo, hi = np.percentile(a, lo_p), np.percentile(a, hi_p)
+    return np.clip((a - lo) / max(1e-4, hi - lo), 0.0, 1.0)
 
 
 def colourfulness(rgb):
@@ -173,19 +172,35 @@ def grade_finish(rgb, params, ao=None, cavity=None):
     # 0 (monochrome) .. 1 (colourful)
     cf = np.clip((colourfulness(rgb) - 0.04) / (0.18 - 0.04), 0.0, 1.0)
     eff_sat = (1.0 - cf) * p["mono_saturation"] + cf * p["saturation"]
-    eff_cavity = min(1.0, p["cavity_strength"] + (1.0 - cf) * p["mono_form_boost"])
     eff_ao = min(1.0, p["ao_strength"] + (1.0 - cf) * p["mono_form_boost"])
     print(f"lofi.cartoonize: chroma={colourfulness(rgb):.3f} cf={cf:.2f} "
-          f"eff_sat={eff_sat:.2f} eff_cavity={eff_cavity:.2f}")
+          f"eff_sat={eff_sat:.2f} form={1.0 - cf:.2f}")
 
     rgb = boost_saturation_contrast(rgb, sat=eff_sat, contrast=p["contrast"])
     floor = p["black_floor"]
     if floor > 0.0:                       # lift dark regions to dark-grey-with-hue
         rgb = floor + rgb * (1.0 - floor)
-    if ao is not None or cavity is not None:
-        shade = _shading(rgb.shape[:2], ao, cavity, eff_ao, eff_cavity)
-        shade = np.maximum(shade, p["shade_floor"])     # cap how dark shading goes
-        rgb = rgb * shade[:, :, None]
+
+    # FORM-FEATURE EMPHASIS. A monochrome subject's identity (a face, a statue) is in
+    # the GEOMETRY, captured by the cavity but baked near-flat. Normalize its contrast,
+    # darken the deep recesses (eye sockets, mouth), and ink the feature edges from the
+    # FORM (not the flat albedo). Scaled by `form` (1 = monochrome, 0 = colourful) so
+    # colourful subjects, whose identity is colour, stay light.
+    form = 1.0 - cf
+    cav_n = _normalize(cavity) if cavity is not None else None
+    shade = np.ones(rgb.shape[:2], dtype=np.float32)
+    if ao is not None:
+        shade *= (1.0 - eff_ao * (1.0 - ao))                    # broad occlusion
+    if cav_n is not None:
+        crease = (1.0 - cav_n) ** 1.6                            # focus on deep recesses
+        shade *= (1.0 - p["cavity_strength"] * (0.4 + 0.6 * form) * crease)
+    shade = np.maximum(shade, p["shade_floor"])
+    rgb = rgb * shade[:, :, None]
+    if cav_n is not None and p["edge_strength"] > 0.0:
+        ink = xdog_edges(cav_n, sigma=p["edge_sigma"], k=1.6, tau=0.98,
+                         eps=p["edge_eps"], phi=p["edge_phi"])
+        rgb = rgb * (1.0 - p["edge_strength"] * (0.3 + 0.7 * form) * (1.0 - ink))[:, :, None]
+
     rgb = np.clip(rgb, 0.0, 1.0)
     return dpid_downscale(rgb, p["supersample"], lam=p["dpid_lambda"])
 
