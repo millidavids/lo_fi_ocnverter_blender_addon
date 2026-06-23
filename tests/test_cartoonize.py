@@ -62,6 +62,35 @@ def test_guided_smooth_flattens_noise_keeps_shape():
     assert out.std() < rgb.std()                 # noise reduced
 
 
+def test_posterize_value_preserves_grey():
+    grey = np.full((8, 8, 3), 0.43, dtype=np.float32)
+    out = ct.posterize_value(grey, 6)
+    # stays neutral (no per-channel grey->colour banding)
+    assert np.allclose(out[:, :, 0], out[:, :, 1])
+    assert np.allclose(out[:, :, 1], out[:, :, 2])
+
+
+def test_colourfulness_low_for_grey_high_for_colour():
+    grey = np.full((8, 8, 3), 0.5, dtype=np.float32)
+    assert ct.colourfulness(grey) < 0.02
+    col = np.zeros((8, 8, 3), dtype=np.float32)
+    col[:, :, 0] = 0.9
+    col[:, :, 2] = 0.1
+    assert ct.colourfulness(col) > 0.5
+
+
+def test_stylize_does_not_manufacture_colour_on_monochrome():
+    rng = np.random.RandomState(7)
+    base = 0.5 + 0.05 * rng.randn(64, 64, 1)                  # near-grey marble-ish
+    rgb = np.clip(np.repeat(base, 3, axis=2) + 0.02 * rng.randn(64, 64, 3),
+                  0, 1).astype(np.float32)
+    params = ct.params_from_settings(object())
+    params["supersample"] = 4
+    out = ct.stylize(rgb, params)
+    # chroma-adaptive: a monochrome input must NOT become a colourful blotch
+    assert ct.colourfulness(out) < 0.12, ct.colourfulness(out)
+
+
 def test_stylize_outputs_target_size():
     rng = np.random.RandomState(3)
     rgb = rng.rand(64, 64, 3).astype(np.float32)

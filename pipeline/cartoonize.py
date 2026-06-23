@@ -86,6 +86,16 @@ def posterize(rgb, levels):
     return np.round(rgb * (levels - 1)) / (levels - 1)
 
 
+def posterize_value(rgb, levels):
+    """Hue-preserving posterize: quantize BRIGHTNESS only and scale RGB to match,
+    so near-grey pixels can't band into different per-channel levels (the artifact
+    that turns monochrome stone into coloured blotches)."""
+    levels = max(2, int(levels))
+    luma = (rgb * _LUMA).sum(axis=2, keepdims=True)
+    q = np.round(luma * (levels - 1)) / (levels - 1)
+    return np.clip(rgb * (q / np.maximum(luma, 1e-4)), 0.0, 1.0)
+
+
 def xdog_edges(luma, sigma=1.0, k=1.6, tau=0.98, eps=0.0, phi=12.0):
     """eXtended Difference-of-Gaussians ink map in [0,1] (1=keep, <1=dark line).
 
@@ -129,14 +139,33 @@ def _shading(luma_shape, ao, cavity, ao_strength, cavity_strength):
     return np.clip(shade, 0.0, 1.0)
 
 
+def colourfulness(rgb):
+    """Robust central chroma of the image in [0,1] (median of max-min per pixel)."""
+    return float(np.median(rgb.max(axis=2) - rgb.min(axis=2)))
+
+
 def stylize(rgb, params, ao=None, cavity=None):
-    """Full cartoon chain on an (H,W,3) float array. Returns (tex,tex,3)."""
+    """Full cartoon chain on an (H,W,3) float array. Returns (tex,tex,3).
+
+    CHROMA-ADAPTIVE: monochrome subjects (stone, marble) get NO saturation boost
+    (so capture-lighting tints + noise aren't amplified into false-colour blotches)
+    and lean on baked form-shading instead; colourful subjects get the full punch."""
     p = params
     rgb = guided_smooth(rgb, sigma=p["smooth_sigma"], eps=p["smooth_eps"],
                         iters=p["smooth_iters"])
-    rgb = boost_saturation_contrast(rgb, sat=p["saturation"], contrast=p["contrast"])
+
+    # 0 (monochrome) .. 1 (colourful)
+    cf = np.clip((colourfulness(rgb) - 0.04) / (0.18 - 0.04), 0.0, 1.0)
+    # mono -> mono_saturation (desaturate noise); colourful -> full saturation
+    eff_sat = (1.0 - cf) * p["mono_saturation"] + cf * p["saturation"]
+    eff_cavity = min(1.0, p["cavity_strength"] + (1.0 - cf) * p["mono_form_boost"])
+    eff_ao = min(1.0, p["ao_strength"] + (1.0 - cf) * p["mono_form_boost"])
+    print(f"lofi.cartoonize: chroma={colourfulness(rgb):.3f} cf={cf:.2f} "
+          f"eff_sat={eff_sat:.2f} eff_cavity={eff_cavity:.2f}")
+
+    rgb = boost_saturation_contrast(rgb, sat=eff_sat, contrast=p["contrast"])
     if p["posterize_levels"]:
-        rgb = posterize(rgb, p["posterize_levels"])
+        rgb = posterize_value(rgb, p["posterize_levels"])   # hue-preserving
     # Lift the black point BEFORE inking/shading so crushed shadows and unscanned
     # dark regions become dark-grey-with-hue instead of flat black blobs (those
     # otherwise get over-accented). Thin XDoG ink lines can still go near-black on
@@ -151,8 +180,7 @@ def stylize(rgb, params, ao=None, cavity=None):
         ink = 1.0 - p["edge_strength"] * (1.0 - ink)    # scale line darkness
         rgb = rgb * ink[:, :, None]
     if ao is not None or cavity is not None:
-        shade = _shading(rgb.shape[:2], ao, cavity,
-                         p["ao_strength"], p["cavity_strength"])
+        shade = _shading(rgb.shape[:2], ao, cavity, eff_ao, eff_cavity)
         shade = np.maximum(shade, p["shade_floor"])     # cap how dark shading goes
         rgb = rgb * shade[:, :, None]
     rgb = np.clip(rgb, 0.0, 1.0)
@@ -192,6 +220,10 @@ def params_from_settings(settings):
         "dpid_lambda": g("dpid_lambda", 1.0),
         "black_floor": g("black_floor", 0.14),
         "shade_floor": g("shade_floor", 0.55),
+        # chroma-adaptive: monochrome subjects desaturate (kill false colour) and
+        # lean harder on baked form-shading so the sculpted form carries identity.
+        "mono_saturation": g("mono_saturation", 0.6),
+        "mono_form_boost": g("mono_form_boost", 0.3),
     }
 
 
