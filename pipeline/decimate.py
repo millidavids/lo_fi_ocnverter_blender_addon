@@ -16,6 +16,20 @@ _BAND = 0.15
 _MAX_ITERS = 3
 
 
+def decimate_to(obj, target_tris, context):
+    """Optional perf valve: collapse `obj` down to ~target_tris in place (used to
+    cap the hi-poly bake source). Approximate; keeps the original topology/UVs."""
+    ensure_active(context, obj)
+    current = len(obj.data.polygons)
+    if current <= target_tris:
+        return
+    mod = obj.modifiers.new("LoFiCap", type="DECIMATE")
+    mod.decimate_type = "COLLAPSE"
+    mod.ratio = max(1e-5, target_tris / current)
+    bpy.ops.object.modifier_apply(modifier=mod.name)
+    print(f"lofi.decimate: capped bake source {current} -> {len(obj.data.polygons)} tris")
+
+
 def run(obj, settings, context):
     ensure_active(context, obj)
 

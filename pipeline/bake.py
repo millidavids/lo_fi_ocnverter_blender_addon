@@ -1,26 +1,28 @@
-"""EMIT bake: flat, unlit colour from any source onto the new UV layout.
+"""Selected-to-active bake: transfer the (cartoonized) source from the HIGH-poly
+onto the LOW-poly's clean UV atlas.
 
-EMIT bakes the Emission socket with no lighting/pass-flag subtlety (the DIFFUSE
-path the sibling used needs `use_pass_color=True` + direct/indirect off — EMIT
-avoids that trap). It unifies all colour sources behind one temporary Emission
-material per slot:
+Iteration 4: instead of a same-mesh bake (which sampled the source through the
+decimated mesh's collapsed/distorted UVs and chopped it into per-island seams),
+we bake hi->lo. Every low-poly texel ray-samples the true high-poly surface
+through its undistorted original UVs, so the albedo transfers accurately and the
+AO/cavity form-shading carries real hi-poly detail.
 
+Material decomposition (verified on 5.1.2): the HI-poly carries the emission
+SOURCE only (no target node); the LO-poly (active) carries the active Image
+Texture target node only. EMIT/AO/Pointiness in selected-to-active all read the
+hi-poly (selected) geometry.
+
+Sources, all unified behind a temp Emission material on the hi-poly:
   * image  -> Image Texture sampled through a UV-Map node pinned to the OLD UV
-              (rebake.py's trick: the source keeps sampling its original layout
-              while the bake destination uses the NEW UV)
-  * vertex -> ShaderNodeVertexColor(.layer_name)   (NOT ShaderNodeColorAttribute,
-              which does not exist in 5.1.2)
+  * vertex -> ShaderNodeVertexColor(.layer_name)
   * solid  -> a flat Emission colour
-
-Multi-material meshes get one Emission material PER slot (each pointing the SAME
-target image node), so a single bake captures every face — no slot's texture is
-silently dropped (don't join-to-dominant).
+Multi-material meshes get one emitter material per hi-poly slot.
 """
 
 import bpy
 
 from . import prep
-from ._context import ensure_active
+from ._context import ensure_object_mode
 
 _NEUTRAL = (0.8, 0.8, 0.8, 1.0)
 
@@ -30,16 +32,15 @@ def _solid_color(mat):
     return tuple(col) if col is not None else _NEUTRAL
 
 
-def _build_emission_material(name, target_img, temp, *, source_img=None,
-                             old_uv=None, vertex_attr=None, solid=None):
-    """A temp Emission material wired to one colour source, with `target_img` as
-    the active (bake destination) node."""
+def _build_emitter_material(name, temp, *, source_img=None, old_uv=None,
+                            vertex_attr=None, solid=None):
+    """A temp Emission material wired to ONE colour source (NO target node).
+    Lives on the hi-poly; its emission is what the s2a bake samples."""
     mat = bpy.data.materials.new(name)
     temp.materials.append(mat)
     mat.use_nodes = True
     nt = mat.node_tree
     nt.nodes.clear()
-
     out = nt.nodes.new("ShaderNodeOutputMaterial")
     emit = nt.nodes.new("ShaderNodeEmission")
     nt.links.new(emit.outputs["Emission"], out.inputs["Surface"])
@@ -57,122 +58,164 @@ def _build_emission_material(name, target_img, temp, *, source_img=None,
         nt.links.new(vc.outputs["Color"], emit.inputs["Color"])
     else:
         emit.inputs["Color"].default_value = solid if solid is not None else _NEUTRAL
+    return mat
 
-    # Target image node LAST, made active+selected: this is the bake destination.
+
+def _build_target_material(name, target_img, temp):
+    """A temp material on the LO-poly whose active node is the bake target image."""
+    mat = bpy.data.materials.new(name)
+    temp.materials.append(mat)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    nt.nodes.clear()
+    nt.nodes.new("ShaderNodeOutputMaterial")
     tgt = nt.nodes.new("ShaderNodeTexImage")
     tgt.image = target_img
     for n in nt.nodes:
         n.select = False
     tgt.select = True
     nt.nodes.active = tgt
-    return mat
+    return mat, tgt
 
 
-def run(obj, settings, context, colour, old_uv, new_uv, temp):
-    ensure_active(context, obj)
-    mesh = obj.data
-    mesh.uv_layers.active = mesh.uv_layers[new_uv]   # bake destination layout
-
-    tex = max(16, settings.tex_size)
-    # In cartoonize mode we bake at a SUPERSAMPLED resolution and let cartoonize
-    # abstract + detail-preservingly downscale to tex_size; otherwise bake direct.
-    cartoon = getattr(settings, "do_cartoonize", False)
-    ss = max(1, int(getattr(settings, "supersample", 4))) if cartoon else 1
-    bake_res = min(1024, tex * ss)
-    img = bpy.data.images.new("lofi_bake", bake_res, bake_res, alpha=True)
-
-    structure_cartoonized = False
-    if colour.kind == prep.ColourSource.MATERIAL and len(obj.material_slots) > 0:
-        # Capture per-slot sources BEFORE we overwrite the slots.
+def _setup_hi_emitters(hipoly, colour, old_uv, cart_params, temp):
+    """Put per-slot emitter materials (cartoonized source / vertex / solid) on the
+    hi-poly. Returns whether the source was cartoonized (decoupled structure)."""
+    mesh = hipoly.data
+    structure = False
+    if colour.kind == prep.ColourSource.MATERIAL and len(hipoly.material_slots) > 0:
         slot_sources = [
-            (prep.base_color_image(slot.material), _solid_color(slot.material))
-            for slot in obj.material_slots
+            (prep.base_color_image(s.material), _solid_color(s.material))
+            for s in hipoly.material_slots
         ]
-        cart_params = None
-        if cartoon:
-            from . import cartoonize
-            cart_params = cartoonize.params_from_settings(settings)
         for i, (src_img, col) in enumerate(slot_sources):
             if src_img is not None and old_uv is not None:
-                if cartoon:
-                    # DECOUPLE: lo-fi the material in its coherent source space first
-                    # (a copy), so the cartoon cells come from the image, not the
-                    # low-poly triangles. The post-bake cartoonize.run then GRADE-only.
+                if cart_params is not None:
+                    from . import cartoonize
                     src_img = cartoonize.cartoonize_source_copy(src_img, cart_params, temp)
-                    structure_cartoonized = True
-                mat = _build_emission_material(
-                    f"lofi_emit_{i}", img, temp, source_img=src_img, old_uv=old_uv)
+                    structure = True
+                mat = _build_emitter_material(f"lofi_emit_{i}", temp,
+                                              source_img=src_img, old_uv=old_uv)
             else:
-                mat = _build_emission_material(
-                    f"lofi_emit_{i}", img, temp, solid=col)
+                mat = _build_emitter_material(f"lofi_emit_{i}", temp, solid=col)
             mesh.materials[i] = mat
     else:
         if colour.kind == prep.ColourSource.VERTEX:
-            mat = _build_emission_material(
-                "lofi_emit", img, temp, vertex_attr=colour.attr_name)
+            mat = _build_emitter_material("lofi_emit", temp, vertex_attr=colour.attr_name)
         else:
-            mat = _build_emission_material(
-                "lofi_emit", img, temp, solid=colour.color)
+            mat = _build_emitter_material("lofi_emit", temp, solid=colour.color)
         mesh.materials.clear()
         mesh.materials.append(mat)
+    return structure
 
-    # Cycles + device, then a flat unlit bake.
+
+def _set_hi_pointiness(hipoly, temp):
+    """Replace the hi-poly's materials with a single Geometry>Pointiness emitter so
+    a selected-to-active EMIT bake captures the hi-poly's cavity/curvature."""
+    mat = bpy.data.materials.new("lofi_cavity_mat")
+    temp.materials.append(mat)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    nt.nodes.clear()
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    emit = nt.nodes.new("ShaderNodeEmission")
+    geo = nt.nodes.new("ShaderNodeNewGeometry")
+    ramp = nt.nodes.new("ShaderNodeValToRGB")
+    ramp.color_ramp.elements[0].position = 0.30     # expand the ~0.4 pointiness cluster
+    ramp.color_ramp.elements[1].position = 0.55
+    nt.links.new(geo.outputs["Pointiness"], ramp.inputs["Fac"])
+    nt.links.new(ramp.outputs["Color"], emit.inputs["Color"])
+    nt.links.new(emit.outputs["Emission"], out.inputs["Surface"])
+    hipoly.data.materials.clear()
+    hipoly.data.materials.append(mat)
+    for p in hipoly.data.polygons:
+        p.material_index = 0
+
+
+def _select_for_bake(context, hipoly, lopoly):
+    ensure_object_mode(context)
+    for o in context.scene.objects:
+        o.select_set(False)
+    hipoly.select_set(True)
+    lopoly.select_set(True)
+    context.view_layer.objects.active = lopoly      # active = bake destination
+
+
+def run(hipoly, lopoly, settings, context, colour, old_uv, new_uv, temp):
+    """Bake the hi-poly's (cartoonized) appearance onto the lo-poly's new UV atlas.
+    Returns {albedo, ao, cavity, res, structure_cartoonized}."""
+    tex = max(16, settings.tex_size)
+    cartoon = getattr(settings, "do_cartoonize", False)
+    ss = max(1, int(getattr(settings, "supersample", 4))) if cartoon else 1
+    bake_res = min(1024, tex * ss)
+
+    cart_params = None
+    if cartoon:
+        from . import cartoonize
+        cart_params = cartoonize.params_from_settings(settings)
+    structure_cartoonized = _setup_hi_emitters(hipoly, colour, old_uv, cart_params, temp)
+
+    lopoly.data.uv_layers.active = lopoly.data.uv_layers[new_uv]
+    albedo = bpy.data.images.new("lofi_bake", bake_res, bake_res, alpha=True)
+    tgt_mat, tgt_node = _build_target_material("lofi_target", albedo, temp)
+    lopoly.data.materials.clear()
+    lopoly.data.materials.append(tgt_mat)
+    for p in lopoly.data.polygons:
+        p.material_index = 0
+
     from ..utils import bake_device
     device = bake_device.setup_cycles(context.scene, use_gpu=settings.use_gpu)
-    bake_settings = context.scene.render.bake
-    # EXTEND bleeds island-edge colour outward to fill the gaps between UV
-    # islands, so NEAREST sampling at seams doesn't pick up the black atlas
-    # background (a generous margin matters on a small, many-island atlas).
-    bake_settings.margin_type = "EXTEND"
-    bake_settings.margin = max(8, bake_res // 8)
-    bake_settings.use_clear = True
-    bake_settings.use_selected_to_active = False
+    bk = context.scene.render.bake
+    bk.use_selected_to_active = True
+    bk.cage_extrusion = getattr(settings, "cage_extrusion", 0.05)
+    bk.margin_type = "EXTEND"
+    bk.margin = max(8, bake_res // 8)
+    bk.use_clear = True
 
-    print(f"lofi.bake: EMIT {bake_res}px on device {device}, source={colour.kind}")
+    _select_for_bake(context, hipoly, lopoly)
+    print(f"lofi.bake: hi->lo EMIT {bake_res}px device={device} source={colour.kind} "
+          f"(hi {len(hipoly.data.polygons)} tris -> lo {len(lopoly.data.polygons)})")
     context.scene.cycles.samples = 1
     bpy.ops.object.bake(type="EMIT")
+    _fill_black_holes(albedo, bake_res, iters=max(64, bake_res // 4))
 
-    # Heal near-black holes: regions the photogrammetry never saw (e.g. a cut
-    # end, the underside) have NO source texture and bake to flat black. Inpaint
-    # them with surrounding colour. Iters must scale with resolution or big holes
-    # stay black-cored (then DPID amplifies them into dark rings).
-    _fill_black_holes(img, bake_res, iters=max(64, bake_res // 4))
+    if not cartoon:
+        # Off / legacy: optional AO multiply + black-floor lift, no aux maps.
+        if getattr(settings, "bake_shading", False):
+            ao = bpy.data.images.new("lofi_ao", bake_res, bake_res, alpha=False)
+            temp.images.append(ao)
+            tgt_node.image = ao
+            context.scene.cycles.samples = 16
+            bpy.ops.object.bake(type="AO")
+            _multiply_ao_into(albedo, ao, bake_res, getattr(settings, "shading_strength", 0.9))
+        floor = getattr(settings, "black_floor", 0.0)
+        if floor > 0.0:
+            _lift_blacks(albedo, bake_res, floor)
+        return {"albedo": albedo, "ao": None, "cavity": None, "res": bake_res,
+                "structure_cartoonized": False}
 
-    if cartoon:
-        # Bake AO + cavity (Pointiness) as SEPARATE maps for cartoonize to use as
-        # feature-popping shading (no multiply here). Order: AO before cavity,
-        # because the cavity bake replaces the material slots.
-        ao = _bake_ao_map(context, obj, bake_res, temp) if getattr(
-            settings, "bake_shading", True) else None
-        cavity = _bake_pointiness(context, obj, bake_res, temp) if getattr(
-            settings, "cavity_strength", 0.0) > 0.0 else None
-        return {"albedo": img, "ao": ao, "cavity": cavity, "res": bake_res,
-                "structure_cartoonized": structure_cartoonized}
-
-    # Legacy (no cartoonize): optional AO multiplied straight into the albedo.
-    if getattr(settings, "bake_shading", False):
-        _bake_ao_into(context, obj, img, bake_res,
-                      getattr(settings, "shading_strength", 0.9))
-    floor = getattr(settings, "black_floor", 0.0)
-    if floor > 0.0:
-        _lift_blacks(img, bake_res, floor)
-    return {"albedo": img, "ao": None, "cavity": None, "res": bake_res,
-            "structure_cartoonized": False}
-
-
-def _lift_blacks(img, res, floor):
-    """Raise the black point so dark/unscanned regions read as dark-grey, not
-    flat black blobs. (Cartoonize does its own lift; this is for the OFF path.)"""
-    import numpy as np
-
-    a = np.empty(res * res * 4, dtype=np.float32)
-    img.pixels.foreach_get(a)
-    a = a.reshape(-1, 4)
-    a[:, :3] = floor + a[:, :3] * (1.0 - floor)
-    img.pixels.foreach_set(a.ravel())
-    img.update()
+    # Cartoonize path: AO + cavity as SEPARATE hi->lo maps for grade_finish.
+    ao = cavity = None
+    if getattr(settings, "bake_shading", True):
+        ao = bpy.data.images.new("lofi_ao", bake_res, bake_res, alpha=False)
+        temp.images.append(ao)
+        tgt_node.image = ao
+        context.scene.cycles.samples = 16
+        bpy.ops.object.bake(type="AO")
+    if getattr(settings, "cavity_strength", 0.0) > 0.0:
+        cavity = bpy.data.images.new("lofi_cavity", bake_res, bake_res, alpha=False)
+        temp.images.append(cavity)
+        _set_hi_pointiness(hipoly, temp)        # hi emits pointiness now
+        tgt_node.image = cavity
+        context.scene.cycles.samples = 1
+        bpy.ops.object.bake(type="EMIT")
+    return {"albedo": albedo, "ao": ao, "cavity": cavity, "res": bake_res,
+            "structure_cartoonized": structure_cartoonized}
 
 
+# --------------------------------------------------------------------------- #
+# numpy helpers (no Blender objects beyond the image)
+# --------------------------------------------------------------------------- #
 def _fill_black_holes(img, tex, thresh=0.085, iters=64):
     import numpy as np
 
@@ -184,7 +227,6 @@ def _fill_black_holes(img, tex, thresh=0.085, iters=64):
     n0 = int(hole.sum())
     if n0 == 0:
         return
-
     filled = rgb.copy()
     h = hole.copy()
     for _ in range(iters):
@@ -199,82 +241,32 @@ def _fill_black_holes(img, tex, thresh=0.085, iters=64):
         fillable = h & (nb_cnt > 0)
         filled[fillable] = nb_sum[fillable] / nb_cnt[fillable][:, None]
         h[fillable] = False
-
     a[:, :, :3] = filled
     img.pixels.foreach_set(a.ravel())
     img.update()
     print(f"lofi.bake: inpainted {n0} near-black hole texels")
 
 
-def _bake_ao_map(context, obj, res, temp):
-    """Bake ambient occlusion into a NEW image (retargeting the materials' active
-    bake-target node). Returns the AO image (tracked as temp)."""
-    ao_img = bpy.data.images.new("lofi_ao", res, res, alpha=False)
-    if temp is not None:
-        temp.images.append(ao_img)
-    for slot in obj.material_slots:
-        nt = slot.material.node_tree
-        if nt and nt.nodes.active and nt.nodes.active.type == "TEX_IMAGE":
-            nt.nodes.active.image = ao_img
-    context.scene.cycles.samples = 16          # AO needs a few samples to smooth
-    context.scene.render.bake.margin_type = "EXTEND"
-    bpy.ops.object.bake(type="AO")
-    return ao_img
-
-
-def _bake_pointiness(context, obj, res, temp):
-    """Bake mesh cavity/curvature via Geometry > Pointiness (concave<0.5<convex).
-
-    Pointiness clusters near 0.4, so a ColorRamp expands the useful band. A single
-    geometric material on all slots suffices (pointiness is per-vertex, slot-
-    independent), and material.py replaces the slots afterward anyway."""
-    img = bpy.data.images.new("lofi_cavity", res, res, alpha=False)
-    mat = bpy.data.materials.new("lofi_cavity_mat")
-    if temp is not None:
-        temp.images.append(img)
-        temp.materials.append(mat)
-    mat.use_nodes = True
-    nt = mat.node_tree
-    nt.nodes.clear()
-    out = nt.nodes.new("ShaderNodeOutputMaterial")
-    emit = nt.nodes.new("ShaderNodeEmission")
-    geo = nt.nodes.new("ShaderNodeNewGeometry")
-    ramp = nt.nodes.new("ShaderNodeValToRGB")
-    ramp.color_ramp.elements[0].position = 0.30     # expand the ~0.4 cluster
-    ramp.color_ramp.elements[1].position = 0.55
-    nt.links.new(geo.outputs["Pointiness"], ramp.inputs["Fac"])
-    nt.links.new(ramp.outputs["Color"], emit.inputs["Color"])
-    nt.links.new(emit.outputs["Emission"], out.inputs["Surface"])
-    tgt = nt.nodes.new("ShaderNodeTexImage")
-    tgt.image = img
-    for n in nt.nodes:
-        n.select = False
-    tgt.select = True
-    nt.nodes.active = tgt
-
-    obj.data.materials.clear()
-    obj.data.materials.append(mat)
-    for p in obj.data.polygons:
-        p.material_index = 0
-    context.scene.cycles.samples = 1
-    bpy.ops.object.bake(type="EMIT")
-    return img
-
-
-def _bake_ao_into(context, obj, img, res, strength):
-    """Legacy path: bake AO and multiply it straight into the albedo `img`."""
+def _multiply_ao_into(img, ao_img, tex, strength):
     import numpy as np
 
-    ao_img = _bake_ao_map(context, obj, res, None)   # not tracked; removed below
-    col = np.empty(res * res * 4, dtype=np.float32)
+    col = np.empty(tex * tex * 4, dtype=np.float32)
     img.pixels.foreach_get(col)
     col = col.reshape(-1, 4)
-    aob = np.empty(res * res * 4, dtype=np.float32)
+    aob = np.empty(tex * tex * 4, dtype=np.float32)
     ao_img.pixels.foreach_get(aob)
     ao = aob.reshape(-1, 4)[:, 0]
-    ao = 1.0 - strength * (1.0 - ao)
-    col[:, :3] *= ao[:, None]
+    col[:, :3] *= (1.0 - strength * (1.0 - ao))[:, None]
     img.pixels.foreach_set(col.ravel())
     img.update()
-    bpy.data.images.remove(ao_img)
-    print(f"lofi.bake: multiplied baked AO (strength {strength}) into albedo")
+
+
+def _lift_blacks(img, tex, floor):
+    import numpy as np
+
+    a = np.empty(tex * tex * 4, dtype=np.float32)
+    img.pixels.foreach_get(a)
+    a = a.reshape(-1, 4)
+    a[:, :3] = floor + a[:, :3] * (1.0 - floor)
+    img.pixels.foreach_set(a.ravel())
+    img.update()

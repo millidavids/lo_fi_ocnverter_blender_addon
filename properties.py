@@ -193,6 +193,27 @@ class LoFiSettings(bpy.types.PropertyGroup):
         default=1.0, min=0.0, max=2.0,
     )
 
+    # --- hi->lo bake (iteration 4) ----------------------------------------
+    cage_extrusion: bpy.props.FloatProperty(
+        name="Bake Cage",
+        description="Ray extrusion for the hi->lo selected-to-active bake, relative "
+                    "to the normalized unit size",
+        default=0.05, min=0.0, soft_max=0.2, max=1.0,
+    )
+    uv_pack_margin: bpy.props.FloatProperty(
+        name="UV Margin",
+        description="Smart-UV island margin + pack spacing (smaller = tighter packing, "
+                    "more texels per island, but tighter seams)",
+        default=0.02, min=0.0, max=0.2,
+    )
+    bake_source_cap: bpy.props.IntProperty(
+        name="Bake Source Cap",
+        description="Optional perf valve: cap the hi-poly bake source to this many "
+                    "triangles (0 = off / full detail). High values only; capping "
+                    "reduces AO/cavity form detail",
+        default=0, min=0, max=2000000,
+    )
+
     # --- device -----------------------------------------------------------
     use_gpu: bpy.props.BoolProperty(
         name="Use GPU (Metal)",

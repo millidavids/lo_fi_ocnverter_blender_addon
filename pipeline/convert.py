@@ -84,38 +84,56 @@ def _assert_nonempty(obj, step):
         raise ConvertError(f"{step} left the mesh empty")
 
 
+def _cleanup(*objs):
+    """Delete the given objects if still present (used on failure paths)."""
+    for o in objs:
+        if o is not None and o.name in bpy.data.objects:
+            _delete_object(o)
+
+
 def convert(context, source_obj, settings):
     state = SceneState.capture(context)
     temp = TempData()
-    clone = None
+    hipoly = None      # full-res bake source (prepped, original UVs) — transient
+    lopoly = None      # decimated deliverable
     success = False
     try:
         ensure_object_mode(context)
-        clone = _duplicate(context, source_obj)
-        clone.name = source_obj.name + "_lofi"
-        ensure_active(context, clone)
 
-        colour = prep.run(clone, settings, context)
-        _assert_nonempty(clone, "prep")
-
+        # --- HI-POLY: the prepped clone, kept full-res as the bake source -----
+        hipoly = _duplicate(context, source_obj)
+        hipoly.name = source_obj.name + "_hipoly"
+        ensure_active(context, hipoly)
+        colour = prep.run(hipoly, settings, context)
+        _assert_nonempty(hipoly, "prep")
         if settings.do_heal:
-            heal.run(clone, settings, context)
-            _assert_nonempty(clone, "heal")
+            heal.run(hipoly, settings, context)
+            _assert_nonempty(hipoly, "heal")
         if settings.do_watertight:
-            watertight.run(clone, settings, context)
-        if settings.do_decimate:
-            decimate.run(clone, settings, context)
-            _assert_nonempty(clone, "decimate")
+            watertight.run(hipoly, settings, context)
         if settings.do_normalize:
-            normalize.run(clone, settings, context)
+            normalize.run(hipoly, settings, context)
+        # optional perf safety valve: cap the bake-source poly count (default off)
+        cap = int(getattr(settings, "bake_source_cap", 0))
+        if cap and len(hipoly.data.polygons) > cap:
+            decimate.decimate_to(hipoly, cap, context)
 
-        old_uv, new_uv = uv_mod.run(clone, settings, context)
-        baked = bake.run(clone, settings, context, colour, old_uv, new_uv, temp)
+        # --- LO-POLY: duplicate the (normalized) hi-poly, decimate, re-UV -----
+        lopoly = _duplicate(context, hipoly)
+        lopoly.name = source_obj.name + "_lofi"
+        ensure_active(context, lopoly)
+        if settings.do_decimate:
+            decimate.run(lopoly, settings, context)
+            _assert_nonempty(lopoly, "decimate")
+        old_uv, new_uv = uv_mod.run(lopoly, settings, context)
+
+        # --- BAKE hi -> lo (albedo + AO + cavity), then drop the hi-poly ------
+        baked = bake.run(hipoly, lopoly, settings, context, colour, old_uv, new_uv, temp)
+        _delete_object(hipoly)
+        hipoly = None
+
         image = baked["albedo"]
         if getattr(settings, "do_cartoonize", False):
-            # Abstract + amplify the supersampled albedo, then detail-preservingly
-            # downscale to tex_size. The hi-res albedo becomes temp; the new
-            # tex_size image is the deliverable texture.
             image = cartoonize.run(
                 baked["albedo"], settings, settings.tex_size,
                 ao_img=baked["ao"], cavity_img=baked["cavity"], temp=temp,
@@ -123,29 +141,27 @@ def convert(context, source_obj, settings):
             temp.images.append(baked["albedo"])
         if settings.do_pixelate:
             pixelate.run(image, settings)
-        material.run(clone, settings, context, image, temp)
+        material.run(lopoly, settings, context, image, temp)
 
         out_path = bpy.path.abspath(settings.output_path)
         facts = export_mod.run(
-            clone, settings, context, out_path,
+            lopoly, settings, context, out_path,
             expect_unlit=True, tri_budget=settings.tri_budget)
 
         success = True
-        return ConvertResult(clone.name, out_path, colour.kind, facts)
+        return ConvertResult(lopoly.name, out_path, colour.kind, facts)
 
     except ConvertError:
-        if clone is not None and clone.name in bpy.data.objects:
-            _delete_object(clone)
+        _cleanup(hipoly, lopoly)
         raise
     except Exception as exc:  # noqa: BLE001
-        if clone is not None and clone.name in bpy.data.objects:
-            _delete_object(clone)
+        _cleanup(hipoly, lopoly)
         raise ConvertError(str(exc)) from exc
     finally:
         temp.purge()
         if success:
             state.restore_engine_and_mode(context)
-            if clone is not None and clone.name in bpy.data.objects:
-                ensure_active(context, clone)   # leave the result selected for the user
+            if lopoly is not None and lopoly.name in bpy.data.objects:
+                ensure_active(context, lopoly)   # leave the result selected for the user
         else:
             state.restore(context)

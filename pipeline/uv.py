@@ -28,9 +28,16 @@ def run(obj, settings, context):
     new_uv = new.name
     mesh.uv_layers.active = new
 
+    margin = getattr(settings, "uv_pack_margin", 0.02)
     bpy.ops.object.mode_set(mode="EDIT")
     bpy.ops.mesh.select_all(action="SELECT")
-    bpy.ops.uv.smart_project(island_margin=0.02)
+    bpy.ops.uv.smart_project(island_margin=margin)
+    # Tighten packing (rotate islands, even spacing) so the small texture isn't
+    # wasted on loose islands -> more texels per island.
+    try:
+        bpy.ops.uv.pack_islands(rotate=True, margin=margin)
+    except (RuntimeError, TypeError) as exc:        # signature drift / no UVs
+        print(f"lofi.uv: pack_islands skipped ({exc})")
     bpy.ops.object.mode_set(mode="OBJECT")
 
     # Re-assert the active layer by name (the reference is stale post-operator).
