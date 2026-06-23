@@ -25,6 +25,17 @@ import numpy as np
 _LUMA = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
 
+def _srgb_to_linear(c):
+    c = np.clip(c, 0.0, 1.0)
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4).astype(np.float32)
+
+
+def _linear_to_srgb(c):
+    c = np.clip(c, 0.0, 1.0)
+    return np.where(c <= 0.0031308, c * 12.92,
+                    1.055 * (c ** (1.0 / 2.4)) - 0.055).astype(np.float32)
+
+
 # --------------------------------------------------------------------------- #
 # primitives
 # --------------------------------------------------------------------------- #
@@ -144,62 +155,84 @@ def colourfulness(rgb):
 
 
 def cartoonize_structure(rgb, params):
-    """Image-driven cartoon STRUCTURE (run in the coherent SOURCE space, pre-bake):
-    flatten into cartoon cells + posterize tone + XDoG ink. NO saturation, black-floor,
-    shading or downscale, and NO cf measurement (the source copy still contains scan
-    background / colour-charts that would mis-route chroma)."""
+    """Coherent cartoon ABSTRACTION in the SOURCE space (pre-bake): edge-preserving
+    guided smoothing into flat cartoon cells, decoupled from the mesh triangles.
+
+    Iteration 6: NO posterize and NO XDoG ink here. Tone-quantization moved post-bake
+    into `grade_finish` (so it acts on the DE-LIT albedo), and ink is dropped entirely
+    — baked-in dark lines can't be relit and fight the de-light goal."""
     p = params
-    rgb = guided_smooth(rgb, sigma=p["smooth_sigma"], eps=p["smooth_eps"],
-                        iters=p["smooth_iters"])
-    if p["posterize_levels"]:
-        rgb = posterize_value(rgb, p["posterize_levels"])   # hue-preserving
-    if p["edge_strength"] > 0.0:
-        luma = (rgb * _LUMA).sum(axis=2)
-        ink = xdog_edges(luma, sigma=p["edge_sigma"], k=1.6, tau=0.98,
-                         eps=p["edge_eps"], phi=p["edge_phi"])
-        ink = 1.0 - p["edge_strength"] * (1.0 - ink)    # scale line darkness
-        rgb = rgb * ink[:, :, None]
-    return np.clip(rgb, 0.0, 1.0)
+    return np.clip(guided_smooth(rgb, sigma=p["smooth_sigma"], eps=p["smooth_eps"],
+                                 iters=p["smooth_iters"]), 0.0, 1.0)
+
+
+def delight(rgb, ao, params):
+    """Remove baked shading from the albedo to recover a flat, intrinsic base colour
+    for a LIT material (the engine relights it). NO-OP when `ao is None` (vertex/solid
+    source path has nothing to de-light).
+
+    Two divides, both in LINEAR space (the bake target is 8-bit sRGB, so the albedo AND
+    the AO read back sRGB-ENCODED — decode both first):
+      1. AO-divide: divide by the geometry's ambient occlusion (mean-1 normalized, floored)
+         to lift occlusion-correlated shadows (eye sockets, crevices). Approximation, not
+         an inverse — won't touch directional capture shadows.
+      2. Retinex low-freq flatten: divide out an edge-preserving low-pass of luminance
+         (mean-1 normalized) to flatten broad directional shading while keeping albedo
+         edges. This is what actually attacks the capture lighting.
+    `delight_strength` blends the result back toward the original."""
+    if ao is None:
+        return rgb
+    p = params
+    strength = float(p.get("delight_strength", 0.8))
+    if strength <= 0.0:
+        return rgb
+
+    lin = _srgb_to_linear(rgb)
+
+    # 1. AO-divide (mean-1, floored so AO~=0 doesn't explode)
+    ao_lin = np.maximum(_srgb_to_linear(ao), 0.2)
+    ao_div = ao_lin / float(ao_lin.mean())
+    lin = lin / ao_div[:, :, None]
+
+    # 2. Retinex: a large Gaussian low-pass of luminance is the shading estimate
+    # (Retinex assumes shading is low-frequency). A Gaussian *tracks* smooth gradients
+    # (so dividing removes them) while sharp albedo edges, living in the numerator,
+    # survive. May leave mild halos at strong shadow edges — accepted, tunable by sigma.
+    luma = (lin * _LUMA).sum(axis=2)
+    shading = gaussian_blur(luma, sigma=p.get("retinex_sigma", 12.0))
+    shading = np.maximum(shading, 1e-3)
+    shading = shading / float(shading.mean())
+    lin = lin / shading[:, :, None]
+
+    # balance to a sane mid-tone and clamp, then re-encode
+    lin = lin * (0.5 / max(1e-3, float((lin * _LUMA).sum(axis=2).mean())))
+    out = _linear_to_srgb(np.clip(lin, 0.0, 1.0))
+    return np.clip(rgb * (1.0 - strength) + out * strength, 0.0, 1.0)
 
 
 def grade_finish(rgb, params, ao=None, cavity=None):
-    """Post-bake GRADE on the (hole-filled, object-dominated) atlas: chroma-adaptive
-    colour grade + black-floor + mesh form-shading + detail-preserving downscale.
-
-    These are per-pixel ops, so they do NOT re-introduce triangle-coupling, and cf is
-    measured here on the filled atlas (object-colour-dominated; hole-fill must precede)."""
+    """Post-bake GRADE on the hole-filled atlas, for a game-ready LIT asset:
+    DE-LIGHT (strip baked shading) -> chroma-adaptive colour punch -> flat intrinsic
+    regions -> detail-preserving downscale. No baked form-shading or ink (the engine
+    lights the geometry). Per-pixel ops, so no triangle-coupling; `cavity` is unused
+    (kept for signature compatibility)."""
     p = params
-    # 0 (monochrome) .. 1 (colourful)
     cf = np.clip((colourfulness(rgb) - 0.04) / (0.18 - 0.04), 0.0, 1.0)
     eff_sat = (1.0 - cf) * p["mono_saturation"] + cf * p["saturation"]
-    eff_ao = min(1.0, p["ao_strength"] + (1.0 - cf) * p["mono_form_boost"])
     print(f"lofi.cartoonize: chroma={colourfulness(rgb):.3f} cf={cf:.2f} "
-          f"eff_sat={eff_sat:.2f} form={1.0 - cf:.2f}")
+          f"eff_sat={eff_sat:.2f} delit={ao is not None}")
 
+    rgb = delight(rgb, ao, p)             # flat intrinsic albedo (no baked shadow)
     rgb = boost_saturation_contrast(rgb, sat=eff_sat, contrast=p["contrast"])
-    floor = p["black_floor"]
-    if floor > 0.0:                       # lift dark regions to dark-grey-with-hue
-        rgb = floor + rgb * (1.0 - floor)
 
-    # FORM-FEATURE EMPHASIS. A monochrome subject's identity (a face, a statue) is in
-    # the GEOMETRY, captured by the cavity but baked near-flat. Normalize its contrast,
-    # darken the deep recesses (eye sockets, mouth), and ink the feature edges from the
-    # FORM (not the flat albedo). Scaled by `form` (1 = monochrome, 0 = colourful) so
-    # colourful subjects, whose identity is colour, stay light.
-    form = 1.0 - cf
-    cav_n = _normalize(cavity) if cavity is not None else None
-    shade = np.ones(rgb.shape[:2], dtype=np.float32)
-    if ao is not None:
-        shade *= (1.0 - eff_ao * (1.0 - ao))                    # broad occlusion
-    if cav_n is not None:
-        crease = (1.0 - cav_n) ** 1.6                            # focus on deep recesses
-        shade *= (1.0 - p["cavity_strength"] * (0.4 + 0.6 * form) * crease)
-    shade = np.maximum(shade, p["shade_floor"])
-    rgb = rgb * shade[:, :, None]
-    if cav_n is not None and p["edge_strength"] > 0.0:
-        ink = xdog_edges(cav_n, sigma=p["edge_sigma"], k=1.6, tau=0.98,
-                         eps=p["edge_eps"], phi=p["edge_phi"])
-        rgb = rgb * (1.0 - p["edge_strength"] * (0.3 + 0.7 * form) * (1.0 - ink))[:, :, None]
+    # flat intrinsic regions: merge shaded-vs-lit variation of one surface into one
+    # colour (skin -> ~one colour), then quantize tone. region_flatten scales the merge.
+    rf = float(p.get("region_flatten", 0.5))
+    if rf > 0.0:
+        rgb = guided_smooth(rgb, sigma=3.0, eps=0.05 * (1.0 - rf) + 0.004,
+                            iters=max(1, int(round(rf * 3))))
+    if p["posterize_levels"]:
+        rgb = posterize_value(rgb, p["posterize_levels"])     # hue-preserving tone steps
 
     rgb = np.clip(rgb, 0.0, 1.0)
     return dpid_downscale(rgb, p["supersample"], lam=p["dpid_lambda"])
@@ -235,19 +268,14 @@ def params_from_settings(settings):
         "saturation": g("saturation", 1.4),
         "contrast": g("contrast", 1.25),
         "posterize_levels": int(g("posterize_levels", 6)),
-        "edge_strength": g("edge_strength", 1.0),
-        "edge_sigma": g("edge_sigma", 1.0),
-        "edge_eps": g("edge_eps", 0.0),
-        "edge_phi": g("edge_phi", 12.0),
-        "ao_strength": g("shading_strength", 0.6),
-        "cavity_strength": g("cavity_strength", 0.6),
         "dpid_lambda": g("dpid_lambda", 1.0),
-        "black_floor": g("black_floor", 0.14),
-        "shade_floor": g("shade_floor", 0.55),
-        # chroma-adaptive: monochrome subjects desaturate (kill false colour) and
-        # lean harder on baked form-shading so the sculpted form carries identity.
+        # de-light (iter-6): strip baked shading for a lit-material base colour.
+        "delight_strength": g("delight_strength", 0.8),
+        "retinex_sigma": g("retinex_sigma", 12.0),
+        "region_flatten": g("region_flatten", 0.5),
+        # chroma-adaptive: monochrome subjects desaturate (kill false colour from
+        # amplifying faint tints); colourful subjects get the full punch.
         "mono_saturation": g("mono_saturation", 0.6),
-        "mono_form_boost": g("mono_form_boost", 0.3),
         "source_res": int(g("source_res", 1024)),
     }
 
@@ -305,6 +333,6 @@ def run(albedo_img, settings, out_size, ao_img=None, cavity_img=None, temp=None,
     out.pixels.foreach_set(rgba.ravel())
     out.update()
     print(f"lofi.cartoonize: {albedo_img.size[0]}px ->{out_size}px "
-          f"(ss x{p['supersample']}, posterize {p['posterize_levels']}, "
-          f"edge {p['edge_strength']}, sat {p['saturation']})")
+          f"(ss x{p['supersample']}, delight {p['delight_strength']}, "
+          f"posterize {p['posterize_levels']}, sat {p['saturation']})")
     return out

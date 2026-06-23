@@ -39,13 +39,12 @@ class LOFI_PT_panel(bpy.types.Panel):
         box.prop(s, "cartoon_preset")
         if s.do_cartoonize:
             box.prop(s, "supersample")
+            box.prop(s, "delight_strength")
+            box.prop(s, "region_flatten")
             box.prop(s, "saturation")
             box.prop(s, "contrast")
             box.prop(s, "posterize_levels")
-            box.prop(s, "edge_strength")
             box.prop(s, "smooth_iters")
-            box.prop(s, "cavity_strength")
-            box.prop(s, "black_floor")
 
         layout.prop(s, "use_gpu")
         layout.prop(s, "output_path")

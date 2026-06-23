@@ -109,29 +109,6 @@ def _setup_hi_emitters(hipoly, colour, old_uv, cart_params, temp):
     return structure
 
 
-def _set_hi_pointiness(hipoly, temp):
-    """Replace the hi-poly's materials with a single Geometry>Pointiness emitter so
-    a selected-to-active EMIT bake captures the hi-poly's cavity/curvature."""
-    mat = bpy.data.materials.new("lofi_cavity_mat")
-    temp.materials.append(mat)
-    mat.use_nodes = True
-    nt = mat.node_tree
-    nt.nodes.clear()
-    out = nt.nodes.new("ShaderNodeOutputMaterial")
-    emit = nt.nodes.new("ShaderNodeEmission")
-    geo = nt.nodes.new("ShaderNodeNewGeometry")
-    ramp = nt.nodes.new("ShaderNodeValToRGB")
-    ramp.color_ramp.elements[0].position = 0.30     # expand the ~0.4 pointiness cluster
-    ramp.color_ramp.elements[1].position = 0.55
-    nt.links.new(geo.outputs["Pointiness"], ramp.inputs["Fac"])
-    nt.links.new(ramp.outputs["Color"], emit.inputs["Color"])
-    nt.links.new(emit.outputs["Emission"], out.inputs["Surface"])
-    hipoly.data.materials.clear()
-    hipoly.data.materials.append(mat)
-    for p in hipoly.data.polygons:
-        p.material_index = 0
-
-
 def _select_for_bake(context, hipoly, lopoly):
     ensure_object_mode(context)
     for o in context.scene.objects:
@@ -194,22 +171,16 @@ def run(hipoly, lopoly, settings, context, colour, old_uv, new_uv, temp):
         return {"albedo": albedo, "ao": None, "cavity": None, "res": bake_res,
                 "structure_cartoonized": False}
 
-    # Cartoonize path: AO + cavity as SEPARATE hi->lo maps for grade_finish.
-    ao = cavity = None
+    # Cartoonize path (iter-6): bake AO hi->lo — it feeds the DE-LIGHT in grade_finish
+    # (divide the baked shading back OUT of the albedo). No cavity bake anymore.
+    ao = None
     if getattr(settings, "bake_shading", True):
         ao = bpy.data.images.new("lofi_ao", bake_res, bake_res, alpha=False)
         temp.images.append(ao)
         tgt_node.image = ao
         context.scene.cycles.samples = 16
         bpy.ops.object.bake(type="AO")
-    if getattr(settings, "cavity_strength", 0.0) > 0.0:
-        cavity = bpy.data.images.new("lofi_cavity", bake_res, bake_res, alpha=False)
-        temp.images.append(cavity)
-        _set_hi_pointiness(hipoly, temp)        # hi emits pointiness now
-        tgt_node.image = cavity
-        context.scene.cycles.samples = 1
-        bpy.ops.object.bake(type="EMIT")
-    return {"albedo": albedo, "ao": ao, "cavity": cavity, "res": bake_res,
+    return {"albedo": albedo, "ao": ao, "cavity": None, "res": bake_res,
             "structure_cartoonized": structure_cartoonized}
 
 

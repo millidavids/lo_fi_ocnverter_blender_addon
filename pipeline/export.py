@@ -35,7 +35,7 @@ def run(obj, settings, context, filepath, *, expect_unlit, tri_budget):
 
     facts = glb_verify.verify_or_raise(
         filepath,
-        expected_tex=settings.tex_size if expect_unlit else None,
+        expected_tex=settings.tex_size,     # dims always checked, independent of lit/unlit
         tri_budget=tri_budget,
         expect_unlit=expect_unlit,
     )

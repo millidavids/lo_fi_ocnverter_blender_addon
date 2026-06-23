@@ -2,10 +2,13 @@
 
 There is no glb-verify in the sibling — this is written from scratch. It parses
 the GLB container (12-byte header + JSON/BIN chunks) and checks the properties
-that a render CANNOT show (especially unlit-ness — Workbench/EEVEE/importers all
-ignore `KHR_materials_unlit`, so this JSON assertion is the SOLE guarantee):
+that a render CANNOT show (especially the lit/unlit material model — Workbench/
+EEVEE/importers all ignore `KHR_materials_unlit`, so this JSON assertion is the
+SOLE guarantee):
 
-  * `KHR_materials_unlit` in extensionsUsed
+  * material model: NOT `KHR_materials_unlit` (iter-6 is lit PBR) — or, if
+    `expect_unlit=True`, that the extension IS present
+  * a `pbrMetallicRoughness.baseColorTexture` exists (for the lit path)
   * every sampler magFilter == 9728 (NEAREST)
   * embedded texture dimensions == expected size
   * triangle count within the budget band
@@ -56,15 +59,31 @@ def _png_dims(png):
     return w, h
 
 
-def verify(path, expected_tex=None, tri_budget=None, tri_band=0.5, expect_unlit=True):
+def verify(path, expected_tex=None, tri_budget=None, tri_band=0.5, expect_unlit=False):
     """Return (facts: dict, problems: list[str]). Empty problems == pass."""
     gltf, binc = parse_glb(path)
     facts, problems = {}, []
 
     ext = gltf.get("extensionsUsed", []) or []
     facts["extensionsUsed"] = ext
-    if expect_unlit and "KHR_materials_unlit" not in ext:
+    is_unlit = "KHR_materials_unlit" in ext
+    if expect_unlit and not is_unlit:
         problems.append("KHR_materials_unlit missing from extensionsUsed")
+    if not expect_unlit and is_unlit:
+        problems.append("material is KHR_materials_unlit (expected a lit PBR material)")
+
+    # Lit path: assert a base-colour texture is actually wired up.
+    if not expect_unlit:
+        mats = gltf.get("materials", []) or []
+        facts["materials"] = len(mats)
+        has_base = any(
+            "baseColorTexture" in (m.get("pbrMetallicRoughness", {}) or {})
+            for m in mats
+        )
+        if not mats:
+            problems.append("no materials in glTF")
+        elif not has_base:
+            problems.append("no pbrMetallicRoughness.baseColorTexture on any material")
 
     samplers = gltf.get("samplers", []) or []
     facts["samplers"] = samplers

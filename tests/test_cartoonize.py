@@ -140,6 +140,66 @@ def test_cf_routing_depends_on_hole_fill():
     assert ct.colourfulness(filled) > 0.15         # correct colourful routing
 
 
+def test_delight_removes_low_freq_shading():
+    # A single flat colour under a broad low-frequency shading ramp -> the ramp is
+    # captured by the Retinex low-pass and divided out, leaving ~uniform luminance.
+    # Inputs are sRGB-encoded (what the bake reads back).
+    p = ct.params_from_settings(object())
+    p["delight_strength"] = 1.0
+    p["retinex_sigma"] = 10.0
+    H = W = 128
+    ramp = np.repeat(np.linspace(0.4, 1.0, W, dtype=np.float32)[None, :], H, axis=0)
+    lin = np.full((H, W, 3), (0.5, 0.2, 0.2), np.float32) * ramp[:, :, None]
+    ao = ct._linear_to_srgb(np.full((H, W), 0.8, np.float32))    # flat AO -> mean-1 no-op
+    out = ct._srgb_to_linear(ct.delight(ct._linear_to_srgb(lin), ao, p))
+    # measure the interior (the low-pass shading estimate is border-biased, negligible
+    # on a real atlas but ~half a small tile)
+    sl = slice(24, H - 24)
+    luma_in = (lin[:, sl] * ct._LUMA).sum(2).mean(0)
+    luma_out = (out[:, sl] * ct._LUMA).sum(2).mean(0)
+    assert luma_out.std() < 0.3 * luma_in.std(), (luma_out.std(), luma_in.std())
+
+
+def test_delight_preserves_albedo_edge():
+    # De-light divides by a per-pixel scalar (shading), so a hard red|blue albedo edge
+    # keeps its hue: left stays red-dominant, right stays blue-dominant.
+    p = ct.params_from_settings(object())
+    p["delight_strength"] = 1.0
+    H = W = 64
+    ramp = np.repeat(np.linspace(0.45, 1.0, W, dtype=np.float32)[None, :], H, axis=0)
+    base = np.zeros((H, W, 3), np.float32)
+    base[:, :W // 2] = (0.55, 0.12, 0.12)
+    base[:, W // 2:] = (0.12, 0.12, 0.55)
+    lin = base * ramp[:, :, None]
+    ao = ct._linear_to_srgb(np.full((H, W), 0.8, np.float32))
+    out = ct._srgb_to_linear(ct.delight(ct._linear_to_srgb(lin), ao, p))
+    left = out[:, 6:W // 2 - 6].mean((0, 1))
+    right = out[:, W // 2 + 6:-6].mean((0, 1))
+    assert left[0] > left[2] and right[2] > right[0], (left, right)
+
+
+def test_delight_ao_divide_lifts_occlusion():
+    # A flat albedo darkened by an AO patch comes back ~uniform (occlusion divided out).
+    p = ct.params_from_settings(object())
+    p["delight_strength"] = 1.0
+    p["retinex_sigma"] = 40.0
+    H = W = 48
+    ao_lin = np.full((H, W), 0.9, np.float32)
+    ao_lin[18:30, 18:30] = 0.3                       # an occluded patch
+    lin = np.full((H, W, 3), 0.5, np.float32) * ao_lin[:, :, None]
+    out = ct._srgb_to_linear(ct.delight(ct._linear_to_srgb(lin), ct._linear_to_srgb(ao_lin), p))
+    patch_in = lin[20:28, 20:28].mean() / lin[2:10, 2:10].mean()
+    patch_out = out[20:28, 20:28].mean() / out[2:10, 2:10].mean()
+    assert patch_out > 1.8 * patch_in, (patch_out, patch_in)   # occlusion lifted toward 1
+
+
+def test_delight_noop_without_ao():
+    p = ct.params_from_settings(object())
+    rgb = np.clip(0.5 + 0.1 * np.random.RandomState(7).randn(16, 16, 3), 0, 1).astype(np.float32)
+    out = ct.delight(rgb, None, p)                   # vertex/solid path: no AO -> no-op
+    assert np.array_equal(out, rgb)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

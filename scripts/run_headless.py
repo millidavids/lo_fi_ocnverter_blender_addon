@@ -73,7 +73,7 @@ def main():
                    help="stylize preset (default HEAVY)")
     p.add_argument("--no-cartoonize", action="store_true")
     p.add_argument("--saturation", type=float)
-    p.add_argument("--edge", type=float, help="ink-outline strength 0..1")
+    p.add_argument("--delight", type=float, help="de-light strength 0..1")
     p.add_argument("--posterize", type=int)
     p.add_argument("--supersample", type=int)
     p.add_argument("--render-geo")
@@ -111,8 +111,8 @@ def main():
         s.do_cartoonize = False
     if args.saturation is not None:
         s.saturation = args.saturation
-    if args.edge is not None:
-        s.edge_strength = args.edge
+    if args.delight is not None:
+        s.delight_strength = args.delight
     if args.posterize is not None:
         s.posterize_levels = args.posterize
     if args.supersample is not None:

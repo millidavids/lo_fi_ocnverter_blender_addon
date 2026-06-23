@@ -22,17 +22,15 @@ def _apply_preset(self, context):
 
 
 # Cartoon-look presets: key -> {prop: value}. OFF disables stylization.
+# iter-6: presets drive de-light + flat-region controls (no baked shadow/ink).
 _CARTOON_PRESETS = {
-    "OFF": dict(do_cartoonize=False, black_floor=0.08),
+    "OFF": dict(do_cartoonize=False),
     "SUBTLE": dict(do_cartoonize=True, smooth_iters=1, posterize_levels=0,
-                   edge_strength=0.0, saturation=1.2, contrast=1.1,
-                   cavity_strength=0.4, black_floor=0.10),
+                   saturation=1.2, contrast=1.1, delight_strength=0.6, region_flatten=0.3),
     "CEL": dict(do_cartoonize=True, smooth_iters=2, posterize_levels=8,
-                edge_strength=0.75, saturation=1.35, contrast=1.2,
-                cavity_strength=0.5, black_floor=0.13),
+                saturation=1.35, contrast=1.2, delight_strength=0.8, region_flatten=0.5),
     "HEAVY": dict(do_cartoonize=True, smooth_iters=2, posterize_levels=6,
-                  edge_strength=1.0, saturation=1.4, contrast=1.2,
-                  cavity_strength=0.45, black_floor=0.15),
+                  saturation=1.4, contrast=1.2, delight_strength=0.9, region_flatten=0.7),
 }
 
 
@@ -124,13 +122,13 @@ class LoFiSettings(bpy.types.PropertyGroup):
     # --- cartoonize / stylize (defaults below == the HEAVY preset) --------
     cartoon_preset: bpy.props.EnumProperty(
         name="Stylize",
-        description="Cartoonization preset (abstract + amplify, not wash-out). "
-                    "Off = plain bake/downscale (v1 behaviour)",
+        description="Cartoonization preset: de-light + abstract into flat colour regions "
+                    "for a LIT game asset. Off = plain bake/downscale (v1 behaviour)",
         items=[
             ("OFF", "Off", "Plain bake + downscale (v1)"),
-            ("SUBTLE", "Subtle", "Light flatten + saturation, no outlines"),
-            ("CEL", "Cel", "Flatten + posterize + soft ink outlines"),
-            ("HEAVY", "Heavy", "Strong flatten + posterize + bold ink outlines + high saturation"),
+            ("SUBTLE", "Subtle", "Light de-light + flatten + saturation"),
+            ("CEL", "Cel", "De-light + flatten regions + posterize"),
+            ("HEAVY", "Heavy", "Strong de-light + flatten + posterize + high saturation"),
         ],
         default="HEAVY",
         update=_apply_cartoon_preset,
@@ -161,31 +159,30 @@ class LoFiSettings(bpy.types.PropertyGroup):
     contrast: bpy.props.FloatProperty(
         name="Contrast", default=1.2, min=0.5, soft_max=2.0, max=3.0,
     )
-    black_floor: bpy.props.FloatProperty(
-        name="Lift Blacks",
-        description="Raise the darkest output so unscanned/dark regions read as "
-                    "dark-grey-with-hue instead of flat black blobs. Thin ink "
-                    "outlines still go darker on top",
-        default=0.15, min=0.0, soft_max=0.3, max=0.6,
-    )
     posterize_levels: bpy.props.IntProperty(
         name="Posterize Levels",
-        description="Tone steps per channel (0 = off). Kept modest so the colour "
-                    "palette does the final reduction",
-        default=6, min=0, max=32,
+        description="Tone steps per channel (0 = off) on the DE-LIT albedo, for flat "
+                    "cartoon regions. Kept modest so the colour palette does the final reduction",
+        default=8, min=0, max=32,
     )
-    edge_strength: bpy.props.FloatProperty(
-        name="Ink Outlines",
-        description="XDoG cartoon outline darkness (0 = none, 1 = bold)",
-        default=1.0, min=0.0, max=1.0,
+    delight_strength: bpy.props.FloatProperty(
+        name="De-light",
+        description="Strip baked shading from the albedo (AO-divide + low-frequency "
+                    "flatten) so the LIT material relights cleanly in-engine. 0 = keep "
+                    "the baked shading",
+        default=0.8, min=0.0, max=1.0,
     )
-    edge_sigma: bpy.props.FloatProperty(name="Ink Width", default=1.0, min=0.4, max=4.0)
-    edge_eps: bpy.props.FloatProperty(name="Ink Threshold", default=0.0, min=-0.2, max=0.2)
-    edge_phi: bpy.props.FloatProperty(name="Ink Steepness", default=12.0, min=1.0, max=60.0)
-    cavity_strength: bpy.props.FloatProperty(
-        name="Cavity",
-        description="Darken concave crevices (baked mesh Pointiness) so form reads",
-        default=0.45, min=0.0, max=1.0,
+    retinex_sigma: bpy.props.FloatProperty(
+        name="De-light Radius",
+        description="Radius of the low-frequency shading estimate removed during de-light "
+                    "(larger = flattens broader directional shadows)",
+        default=12.0, min=2.0, max=40.0,
+    )
+    region_flatten: bpy.props.FloatProperty(
+        name="Flatten Regions",
+        description="Merge shaded-vs-lit variation of one surface into a single flat "
+                    "colour (skin -> ~one colour) before posterizing",
+        default=0.5, min=0.0, max=1.0,
     )
     dpid_lambda: bpy.props.FloatProperty(
         name="Detail Preservation",

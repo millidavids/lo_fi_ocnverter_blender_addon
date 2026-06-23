@@ -146,7 +146,7 @@ def convert(context, source_obj, settings):
         out_path = bpy.path.abspath(settings.output_path)
         facts = export_mod.run(
             lopoly, settings, context, out_path,
-            expect_unlit=True, tri_budget=settings.tri_budget)
+            expect_unlit=False, tri_budget=settings.tri_budget)   # iter-6: lit PBR
 
         success = True
         return ConvertResult(lopoly.name, out_path, colour.kind, facts)
