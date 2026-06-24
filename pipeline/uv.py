@@ -42,5 +42,16 @@ def run(obj, settings, context):
 
     # Re-assert the active layer by name (the reference is stale post-operator).
     mesh.uv_layers.active = mesh.uv_layers[new_uv]
-    print(f"lofi.uv: old='{old_uv}' new='{new_uv}'")
+    mesh.uv_layers[new_uv].active_render = True
+    # CRITICAL: drop the original UV layer from the LOW-POLY entirely, leaving only the
+    # baked layout. The texture is baked into `new_uv`, but the glTF exporter assigns
+    # TEXCOORD_0 by layer ORDER (the original UV is index 0) and the material samples
+    # TEXCOORD_0 — so a leftover original layer makes the exported material sample the
+    # baked atlas through the WRONG layout (features/colours land in the wrong places;
+    # invisible on uniform subjects, glaring on anything with distinct features). The
+    # HI-POLY keeps its own original UV — the bake emitter still samples the source
+    # through it (that's `old_uv`, on a separate object).
+    for uvl in [u for u in mesh.uv_layers if u.name != new_uv]:
+        mesh.uv_layers.remove(uvl)
+    print(f"lofi.uv: old='{old_uv}' new='{new_uv}' (low-poly now has only the baked UV)")
     return old_uv, new_uv
