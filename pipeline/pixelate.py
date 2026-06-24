@@ -51,19 +51,26 @@ def median_cut_palette(rgb, n_colors):
     return palette, labels
 
 
-def quantize_rgb(rgb, n_colors):
+def quantize_rgb(rgb, n_colors, chunk=50000):
     """Return `rgb` remapped to its <= n_colors median-cut palette (same shape).
 
     Each pixel is assigned to its NEAREST palette colour, NOT its median-cut box mean.
     Box membership can hand a pixel a different-hue average (e.g. a duck's belly orange
     landing in a box that also spans the red bill -> the box mean is reddish), even when
-    a closer same-hue palette entry exists. Nearest-colour assignment avoids that."""
+    a closer same-hue palette entry exists. Nearest-colour assignment avoids that.
+
+    The N×K nearest-colour search is CHUNKED: at hi-fi (2048² px × 256 float64 colours)
+    a single broadcast would allocate ~26 GB. Process `chunk` pixels at a time instead."""
     palette, _ = median_cut_palette(rgb, n_colors)
     if len(palette) == 0:
         return rgb
-    d = ((rgb[:, None, :] - palette[None, :, :]) ** 2).sum(axis=2)
-    nearest = np.argmin(d, axis=1)
-    return palette[nearest].astype(rgb.dtype)
+    out = np.empty_like(rgb)
+    pal = palette[None, :, :]                       # (1, K, 3)
+    for i in range(0, len(rgb), chunk):
+        block = rgb[i:i + chunk]
+        d = ((block[:, None, :] - pal) ** 2).sum(axis=2)
+        out[i:i + chunk] = palette[np.argmin(d, axis=1)]
+    return out.astype(rgb.dtype)
 
 
 def run(image, settings):

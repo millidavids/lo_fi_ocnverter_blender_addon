@@ -6,19 +6,35 @@ these (see `pipeline.convert`); the UI panel (see `ui.panel`) draws them.
 
 import bpy
 
-# (tri_budget, tex_size, palette_colors) per preset.
+# preset -> (geo_resolution, mat_resolution) fidelity levels, relative to the source.
+# The two sliders are the source of truth; presets just quick-set them.
 _PRESETS = {
-    "PS1": (1000, 64, 16),
-    "LOFI": (1500, 128, 32),
-    "N64": (2500, 128, 64),
-    "HIFI": (5000, 256, 128),
+    "PS1": (0.18, 0.18),
+    "LOFI": (0.50, 0.50),
+    "N64": (0.68, 0.62),
+    "HIFI": (0.85, 0.85),
 }
+
+_applying_preset = False    # re-entrancy guard (set-slider must not reset the preset)
 
 
 def _apply_preset(self, context):
+    if self.preset == "CUSTOM":
+        return
     vals = _PRESETS.get(self.preset)
     if vals is not None:
-        self.tri_budget, self.tex_size, self.palette_colors = vals
+        global _applying_preset
+        _applying_preset = True
+        self.geo_resolution, self.mat_resolution = vals
+        _applying_preset = False
+
+
+def _slider_update(self, context):
+    # Moving a slider by hand drops the preset to Custom — but NOT while _apply_preset
+    # is itself writing the sliders (the EnumProperty update fires on every assignment,
+    # which would otherwise immediately clobber a just-picked preset).
+    if not _applying_preset and self.preset != "CUSTOM":
+        self.preset = "CUSTOM"
 
 
 # Cartoon-look presets: key -> {prop: value}. OFF disables stylization.
@@ -47,24 +63,47 @@ def _apply_cartoon_preset(self, context):
 class LoFiSettings(bpy.types.PropertyGroup):
     preset: bpy.props.EnumProperty(
         name="Preset",
-        description="Quick budget presets; pick Custom to set values by hand",
+        description="Quick fidelity presets; they set the Geometry + Material sliders. "
+                    "Pick Custom (or move a slider) to set them by hand",
         items=[
-            ("PS1", "PS1 (tiny)", "1000 tris, 64px, 16 colours"),
-            ("LOFI", "Lo-Fi (default)", "1500 tris, 128px, 32 colours"),
-            ("N64", "N64", "2500 tris, 128px, 64 colours"),
-            ("HIFI", "Hi-Fi lo-fi", "5000 tris, 256px, 128 colours"),
-            ("CUSTOM", "Custom", "Set budgets manually"),
+            ("PS1", "PS1 (tiny)", "Very low geometry + material"),
+            ("LOFI", "Lo-Fi (default)", "Low geometry + material"),
+            ("N64", "N64", "Medium geometry + material"),
+            ("HIFI", "Hi-Fi lo-fi", "High — near the original"),
+            ("CUSTOM", "Custom", "Set the sliders (or manual budgets) by hand"),
         ],
         default="LOFI",
         update=_apply_preset,
     )
 
-    # --- budgets ----------------------------------------------------------
+    # --- resolution sliders (the primary control) -------------------------
+    # 0 = a few triangles / a tiny texture; 1 ~= slightly less than the original.
+    # Scaled relative to the source's own resolution (resolved in pipeline.resolution).
+    geo_resolution: bpy.props.FloatProperty(
+        name="Geometry",
+        description="Mesh detail, relative to the source: 0 = a few triangles, "
+                    "1 = slightly less than the original",
+        default=0.50, min=0.0, max=1.0, subtype="FACTOR", update=_slider_update,
+    )
+    mat_resolution: bpy.props.FloatProperty(
+        name="Material",
+        description="Texture/colour detail, relative to the source: 0 = tiny + few "
+                    "colours, 1 = near the original. Independent of Geometry",
+        default=0.50, min=0.0, max=1.0, subtype="FACTOR", update=_slider_update,
+    )
+    manual_budgets: bpy.props.BoolProperty(
+        name="Manual Budgets",
+        description="Ignore the sliders and use the exact triangle/texture/palette "
+                    "values below",
+        default=False,
+    )
+
+    # --- budgets (manual-override values; otherwise derived from the sliders) ---
     tri_budget: bpy.props.IntProperty(
         name="Triangle Budget",
         description="Target triangle count after decimation (approximate; a "
                     "tolerance band is applied)",
-        default=1500, min=50, soft_min=300, soft_max=5000, max=50000,
+        default=1500, min=4, soft_min=300, soft_max=5000, max=50000,
     )
     tex_size: bpy.props.IntProperty(
         name="Texture Size",
@@ -101,8 +140,17 @@ class LoFiSettings(bpy.types.PropertyGroup):
     )
     do_normalize: bpy.props.BoolProperty(
         name="Normalize",
-        description="Centre on the world origin and scale to the target size",
+        description="Centre on the world origin and scale to the Target Size. The hi->lo "
+                    "bake is calibrated for this ~unit size — leave ON and use 'Keep "
+                    "Original Size' if you want the result at the source's scale",
         default=True,
+    )
+    keep_original_size: bpy.props.BoolProperty(
+        name="Keep Original Size",
+        description="Output the lo-fi at the SOURCE's world size + position (a drop-in "
+                    "replacement) instead of the normalized Target Size. The bake still "
+                    "runs on a unit object internally, then the result is scaled back",
+        default=False,
     )
     do_pixelate: bpy.props.BoolProperty(
         name="Pixelate / Palette",
@@ -227,7 +275,9 @@ class LoFiSettings(bpy.types.PropertyGroup):
     # --- output -----------------------------------------------------------
     output_path: bpy.props.StringProperty(
         name="Output .glb",
-        description="Where to write the exported lo-fi .glb",
+        description="Where to write the exported lo-fi .glb. Leave blank to auto-derive "
+                    "it from the source object (its asset folder / the .blend / your home, "
+                    "named <object>_lofi.glb)",
         subtype="FILE_PATH",
-        default="//lofi_export.glb",
+        default="",
     )

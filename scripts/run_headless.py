@@ -58,6 +58,12 @@ def main():
     p = argparse.ArgumentParser(prog="run_headless")
     p.add_argument("input")
     p.add_argument("output")
+    p.add_argument("--geo", type=float, help="geometry resolution slider 0..1 "
+                   "(0=few tris, 1=near original)")
+    p.add_argument("--mat", type=float, help="material resolution slider 0..1 "
+                   "(0=tiny+few colours, 1=near original)")
+    p.add_argument("--manual", action="store_true",
+                   help="use exact --tris/--tex/--colors instead of the sliders")
     p.add_argument("--tris", type=int)
     p.add_argument("--tex", type=int)
     p.add_argument("--colors", type=int)
@@ -87,12 +93,22 @@ def main():
 
     s = bpy.context.scene.lofi_settings
     s.output_path = args.output
-    if args.tris is not None:
-        s.tri_budget = args.tris
-    if args.tex is not None:
-        s.tex_size = args.tex
-    if args.colors is not None:
-        s.palette_colors = args.colors
+    # Resolution: --manual (or any explicit --tris/--tex/--colors) uses exact budgets;
+    # otherwise --geo/--mat drive the relative sliders.
+    manual = args.manual or any(v is not None for v in (args.tris, args.tex, args.colors))
+    s.manual_budgets = manual
+    if manual:
+        if args.tris is not None:
+            s.tri_budget = args.tris
+        if args.tex is not None:
+            s.tex_size = args.tex
+        if args.colors is not None:
+            s.palette_colors = args.colors
+    else:
+        if args.geo is not None:
+            s.geo_resolution = args.geo
+        if args.mat is not None:
+            s.mat_resolution = args.mat
     if args.size is not None:
         s.target_size = args.size
     s.do_heal = not args.no_heal

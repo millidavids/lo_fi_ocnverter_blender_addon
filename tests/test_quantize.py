@@ -63,6 +63,18 @@ def test_empty_and_single():
     assert np.allclose(out, one)
 
 
+def test_chunked_matches_oneshot_on_large():
+    # Larger than the default chunk -> exercises the chunked nearest-colour path.
+    # The median-cut palette is deterministic, so chunk size must not change the result
+    # (this locks in the hi-fi OOM fix: chunked == one-shot).
+    rgb = np.random.RandomState(11).rand(160000, 3).astype(np.float32)
+    one_shot = pixelate.quantize_rgb(rgb, 16, chunk=10_000_000)
+    chunked = pixelate.quantize_rgb(rgb, 16, chunk=5000)
+    assert chunked.shape == rgb.shape
+    assert np.array_equal(chunked, one_shot)
+    assert len(_unique_rows(chunked)) <= 16
+
+
 def test_palette_count_bound():
     rgb = np.random.RandomState(1).rand(500, 3)
     palette, labels = pixelate.median_cut_palette(rgb, 16)

@@ -123,13 +123,20 @@ def run(hipoly, lopoly, settings, context, colour, old_uv, new_uv, temp):
     Returns {albedo, ao, cavity, res, structure_cartoonized}."""
     tex = max(16, settings.tex_size)
     cartoon = getattr(settings, "do_cartoonize", False)
+    # Supersample the bake then detail-preservingly downscale to `tex`, bounded by
+    # MAX_BAKE so a hi-fi material (tex up to 2048) doesn't blow up. At tex==MAX_BAKE the
+    # supersample collapses to 1 (no DPID downscale) — fine, a 2048 texture barely needs
+    # downscaling. (Was a hard min(1024, ...) that clamped hi-fi materials.)
+    MAX_BAKE = 2048
     ss = max(1, int(getattr(settings, "supersample", 4))) if cartoon else 1
-    bake_res = min(1024, tex * ss)
+    ss = max(1, min(ss, MAX_BAKE // tex))
+    bake_res = min(MAX_BAKE, tex * ss)
 
     cart_params = None
     if cartoon:
         from . import cartoonize
         cart_params = cartoonize.params_from_settings(settings)
+        cart_params["source_res"] = bake_res    # hi-fi material -> sample a hi-fi source
     structure_cartoonized = _setup_hi_emitters(hipoly, colour, old_uv, cart_params, temp)
 
     lopoly.data.uv_layers.active = lopoly.data.uv_layers[new_uv]
