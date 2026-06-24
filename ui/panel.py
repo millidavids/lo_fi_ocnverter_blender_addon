@@ -81,13 +81,15 @@ class LOFI_PT_panel(bpy.types.Panel):
             box.prop(s, "smooth_iters")
 
         layout.prop(s, "use_gpu")
-        layout.prop(s, "output_path")
-        if is_mesh and not (s.output_path or "").strip():
-            try:
-                from ..pipeline.convert import default_output_path
-                layout.label(text="→ " + default_output_path(obj), icon="FILE_TICK")
-            except Exception:  # noqa: BLE001
-                pass
+        layout.prop(s, "export_to_file")
+        if s.export_to_file:
+            layout.prop(s, "output_path")
+            if is_mesh and not (s.output_path or "").strip():
+                try:
+                    from ..pipeline.convert import default_output_path
+                    layout.label(text="→ " + default_output_path(obj), icon="FILE_TICK")
+                except Exception:  # noqa: BLE001
+                    pass
 
         row = layout.row()
         row.scale_y = 1.4

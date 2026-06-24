@@ -111,8 +111,9 @@ class ConvertResult:
         self.facts = facts
 
     def summary(self):
-        return (f"Lo-Fi: '{self.clone_name}' "
-                f"({self.facts.get('tris', '?')} tris, {self.colour}) -> {self.out_path}")
+        where = self.out_path if self.out_path else "in scene (not exported)"
+        tris = self.facts.get("tris", "?") if self.facts else "?"
+        return f"Lo-Fi: '{self.clone_name}' ({tris} tris, {self.colour}) -> {where}"
 
 
 def _duplicate(context, obj):
@@ -218,13 +219,18 @@ def convert(context, source_obj, settings):
             lopoly.data.update()
             print(f"lofi.size: kept original size ~{orig_size:.4f}u at {tuple(round(c,3) for c in orig_center)}")
 
-        out = (settings.output_path or "").strip()
-        if out in _AUTO_OUTPUT:                  # unset/placeholder -> derive from source
-            out = default_output_path(source_obj)
-        out_path = bpy.path.abspath(out)
-        facts = export_mod.run(
-            lopoly, eff, context, out_path,
-            expect_unlit=False, tri_budget=eff.tri_budget)   # iter-6: lit PBR
+        out_path, facts = None, None
+        if getattr(settings, "export_to_file", True):
+            out = (settings.output_path or "").strip()
+            if out in _AUTO_OUTPUT:              # unset/placeholder -> derive from source
+                out = default_output_path(source_obj)
+            out_path = bpy.path.abspath(out)
+            facts = export_mod.run(
+                lopoly, eff, context, out_path,
+                expect_unlit=False, tri_budget=eff.tri_budget)   # iter-6: lit PBR
+        else:
+            facts = {"tris": len(lopoly.data.polygons)}
+            print(f"lofi.convert: '{lopoly.name}' kept in scene (export to file off)")
 
         success = True
         return ConvertResult(lopoly.name, out_path, colour.kind, facts)

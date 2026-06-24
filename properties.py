@@ -273,6 +273,13 @@ class LoFiSettings(bpy.types.PropertyGroup):
     )
 
     # --- output -----------------------------------------------------------
+    export_to_file: bpy.props.BoolProperty(
+        name="Export to File",
+        description="Write the result to a .glb file. Turn OFF to only build the lo-fi "
+                    "object in the scene (iterate on the sliders + regenerate without "
+                    "creating a pile of files)",
+        default=True,
+    )
     output_path: bpy.props.StringProperty(
         name="Output .glb",
         description="Where to write the exported lo-fi .glb. Leave blank to auto-derive "

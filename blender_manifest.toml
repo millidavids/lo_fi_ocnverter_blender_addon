@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "lo_fi_converter"
-version = "0.2.1"
+version = "0.2.2"
 name = "Lo-Fi Converter"
 tagline = "Turn scan meshes into lo-fi, pixelated, lit-PBR glb game assets"
 maintainer = "Blackhearth Games <david.a.yurek@gmail.com>"
