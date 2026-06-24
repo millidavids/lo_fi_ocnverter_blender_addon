@@ -11,26 +11,34 @@ So we collapse each cap face's source-UVs onto one representative texel, baking
 the cap to a single FLAT colour (the plan's intent for a hidden base/back).
 """
 
+import numpy as np
 import bpy
 
 from ._context import ensure_active
 
 
 def _representative_uv(mesh, n_real):
-    """Mean UV of the real (pre-cap) faces — a texel likely on actual content."""
+    """A texel representative of the DOMINANT surface (the body), for the cap colour.
+
+    NOT the mean UV: averaging coordinates across disjoint UV islands lands on a
+    meaningless point — often a minor feature (e.g. a duck's red bill) or empty UV
+    space — which then bakes the cap that colour and bleeds it onto nearby real
+    geometry. Instead take the centre of the densest UV histogram bin: the largest
+    island, i.e. the body, whose colour is the safe choice for invented geometry."""
     uvdata = mesh.uv_layers.active.data
-    su = sv = 0.0
-    count = 0
-    step = max(1, n_real // 2000)
+    bins = 64
+    hist = np.zeros((bins, bins), dtype=np.int64)
+    step = max(1, n_real // 4000)
     for pi in range(0, n_real, step):
         for li in mesh.polygons[pi].loop_indices:
             uv = uvdata[li].uv
-            su += uv[0]
-            sv += uv[1]
-            count += 1
-    if count == 0:
+            iu = min(bins - 1, max(0, int(uv[0] * bins)))
+            iv = min(bins - 1, max(0, int(uv[1] * bins)))
+            hist[iu, iv] += 1
+    if hist.sum() == 0:
         return (0.5, 0.5)
-    return (min(1.0, max(0.0, su / count)), min(1.0, max(0.0, sv / count)))
+    iu, iv = np.unravel_index(int(np.argmax(hist)), hist.shape)
+    return ((iu + 0.5) / bins, (iv + 0.5) / bins)
 
 
 def _flatten_cap_uvs(mesh, n_real):

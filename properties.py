@@ -23,14 +23,17 @@ def _apply_preset(self, context):
 
 # Cartoon-look presets: key -> {prop: value}. OFF disables stylization.
 # iter-6: presets drive de-light + flat-region controls (no baked shadow/ink).
+# Saturation is kept modest: a big multiplicative boost over-saturates already-vivid,
+# warm subjects (e.g. a rubber duck), pushing tones into false reds that the palette then
+# snaps into blotches. Near-monochrome subjects desaturate via the mono path regardless.
 _CARTOON_PRESETS = {
     "OFF": dict(do_cartoonize=False),
     "SUBTLE": dict(do_cartoonize=True, smooth_iters=1, posterize_levels=0,
-                   saturation=1.2, contrast=1.1, delight_strength=0.6, region_flatten=0.3),
+                   saturation=1.08, contrast=1.1, delight_strength=0.6, region_flatten=0.3),
     "CEL": dict(do_cartoonize=True, smooth_iters=2, posterize_levels=8,
-                saturation=1.35, contrast=1.2, delight_strength=0.8, region_flatten=0.5),
+                saturation=1.15, contrast=1.2, delight_strength=0.8, region_flatten=0.5),
     "HEAVY": dict(do_cartoonize=True, smooth_iters=2, posterize_levels=6,
-                  saturation=1.4, contrast=1.2, delight_strength=0.9, region_flatten=0.7),
+                  saturation=1.25, contrast=1.2, delight_strength=0.9, region_flatten=0.7),
 }
 
 
@@ -153,8 +156,10 @@ class LoFiSettings(bpy.types.PropertyGroup):
     smooth_sigma: bpy.props.FloatProperty(name="Flatten Radius", default=2.0, min=0.5, max=8.0)
     smooth_eps: bpy.props.FloatProperty(name="Flatten Threshold", default=0.02, min=0.001, max=0.2)
     saturation: bpy.props.FloatProperty(
-        name="Saturation", description="Colour punch (1 = unchanged)",
-        default=1.4, min=0.0, soft_max=2.5, max=4.0,
+        name="Saturation", description="Colour punch for colourful subjects (1 = unchanged). "
+                    "Kept modest — a large boost over-saturates already-vivid subjects into "
+                    "false reds",
+        default=1.2, min=0.0, soft_max=2.5, max=4.0,
     )
     contrast: bpy.props.FloatProperty(
         name="Contrast", default=1.2, min=0.5, soft_max=2.0, max=3.0,

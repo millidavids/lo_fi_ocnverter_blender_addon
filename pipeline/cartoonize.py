@@ -160,28 +160,29 @@ def cartoonize_structure(rgb, params):
 
     Iteration 6: NO posterize and NO XDoG ink here. Tone-quantization moved post-bake
     into `grade_finish` (so it acts on the DE-LIT albedo), and ink is dropped entirely
-    — baked-in dark lines can't be relit and fight the de-light goal."""
+    — baked-in dark lines can't be relit and fight the de-light goal.
+
+    `region_flatten` adds extra smoothing passes HERE (coherent source space) rather
+    than post-bake: merging a surface into flat regions in the source layout can't bleed
+    colour across the chopped/packed low-poly atlas seams."""
     p = params
+    extra = int(round(p.get("region_flatten", 0.0) * 2.0))   # merge regions in coherent space
     return np.clip(guided_smooth(rgb, sigma=p["smooth_sigma"], eps=p["smooth_eps"],
-                                 iters=p["smooth_iters"]), 0.0, 1.0)
+                                 iters=p["smooth_iters"] + extra), 0.0, 1.0)
 
 
 def delight(rgb, ao, params):
-    """Remove baked shading from the albedo to recover a flat, intrinsic base colour
-    for a LIT material (the engine relights it). NO-OP when `ao is None` (vertex/solid
-    source path has nothing to de-light).
+    """Remove baked shading to recover a flat, intrinsic base colour for a LIT material.
 
-    Two divides, both in LINEAR space (the bake target is 8-bit sRGB, so the albedo AND
-    the AO read back sRGB-ENCODED — decode both first):
-      1. AO-divide: divide by the geometry's ambient occlusion (mean-1 normalized, floored)
-         to lift occlusion-correlated shadows (eye sockets, crevices). Approximation, not
-         an inverse — won't touch directional capture shadows.
-      2. Retinex low-freq flatten: divide out an edge-preserving low-pass of luminance
-         (mean-1 normalized) to flatten broad directional shading while keeping albedo
-         edges. This is what actually attacks the capture lighting.
-    `delight_strength` blends the result back toward the original."""
-    if ao is None:
-        return rgb
+    CRITICAL: run this in the COHERENT SOURCE space (pre-bake), NEVER on the chopped/
+    packed low-poly atlas. De-light is a per-pixel brightness correction; if its
+    estimate is imperfect at a UV-island seam (and it always is), the atlas version
+    bleeds that error across seams and splatters brightness mottling onto unrelated
+    parts of the mesh. In source space the correction follows the real surface layout.
+
+    `ao` is optional (AO-divide lifts occlusion-correlated shadows); the Retinex luma
+    low-pass flatten runs regardless and is what attacks broad capture lighting. All in
+    LINEAR space (decode sRGB -> divide -> re-encode). `delight_strength` blends back."""
     p = params
     strength = float(p.get("delight_strength", 0.8))
     if strength <= 0.0:
@@ -189,48 +190,57 @@ def delight(rgb, ao, params):
 
     lin = _srgb_to_linear(rgb)
 
-    # 1. AO-divide (mean-1, floored so AO~=0 doesn't explode)
-    ao_lin = np.maximum(_srgb_to_linear(ao), 0.2)
-    ao_div = ao_lin / float(ao_lin.mean())
-    lin = lin / ao_div[:, :, None]
-
-    # 2. Retinex: a large Gaussian low-pass of luminance is the shading estimate
-    # (Retinex assumes shading is low-frequency). A Gaussian *tracks* smooth gradients
-    # (so dividing removes them) while sharp albedo edges, living in the numerator,
-    # survive. May leave mild halos at strong shadow edges — accepted, tunable by sigma.
+    # Shading estimate: a large Gaussian low-pass of luminance (Retinex assumes shading is
+    # low-frequency). AUTO-ADAPT first: de-lighting is ill-posed, and an already-flat
+    # source (e.g. a Poly Haven diffuse, authored as clean albedo: shading_amt ~0.1) has
+    # little low-frequency luma variation, so de-lighting it only normalizes real albedo
+    # texture into mottle. A raw photogrammetry scan (statues ~0.4-0.8) has strong baked
+    # shading. Scale by how much broad shading exists (spread of the log estimate).
     luma = (lin * _LUMA).sum(axis=2)
-    shading = gaussian_blur(luma, sigma=p.get("retinex_sigma", 12.0))
-    shading = np.maximum(shading, 1e-3)
+    shading = np.maximum(gaussian_blur(luma, sigma=p.get("retinex_sigma", 12.0)), 1e-3)
     shading = shading / float(shading.mean())
-    lin = lin / shading[:, :, None]
+    shading_amt = float(np.std(np.log(shading)))
+    auto = float(np.clip((shading_amt - 0.15) / (0.45 - 0.15), 0.0, 1.0))
+    print(f"lofi.delight: shading_amt={shading_amt:.3f} auto={auto:.2f}")
+    if ao is None and auto < 0.03:
+        return rgb                        # already-clean source -> true no-op
 
-    # balance to a sane mid-tone and clamp, then re-encode
-    lin = lin * (0.5 / max(1e-3, float((lin * _LUMA).sum(axis=2).mean())))
+    if ao is not None:                    # AO-divide (mean-1, floored so AO~=0 can't explode)
+        ao_lin = np.maximum(_srgb_to_linear(ao), 0.2)
+        lin = lin / (ao_lin / float(ao_lin.mean()))[:, :, None]
+    # Dividing the shading out flattens broad gradients; sharp albedo edges (in the
+    # numerator) survive. `shading ** auto` scales the correction: ~no-op on flat sources,
+    # full on shaded ones. In source space the few large islands keep cross-seam bleed tiny.
+    lin = lin / (shading ** auto)[:, :, None]
+
+    lin = lin * (0.5 / max(1e-3, float((lin * _LUMA).sum(axis=2).mean())))   # balance mid-tone
     out = _linear_to_srgb(np.clip(lin, 0.0, 1.0))
     return np.clip(rgb * (1.0 - strength) + out * strength, 0.0, 1.0)
 
 
 def grade_finish(rgb, params, ao=None, cavity=None):
     """Post-bake GRADE on the hole-filled atlas, for a game-ready LIT asset:
-    DE-LIGHT (strip baked shading) -> chroma-adaptive colour punch -> flat intrinsic
-    regions -> detail-preserving downscale. No baked form-shading or ink (the engine
-    lights the geometry). Per-pixel ops, so no triangle-coupling; `cavity` is unused
-    (kept for signature compatibility)."""
+    chroma-adaptive colour punch -> tone steps -> detail-preserving downscale.
+
+    PER-PIXEL / block-local ops ONLY. No de-light, no spatial blur, no shading here —
+    the atlas is a chopped/packed UV layout, so anything spatial bleeds colour across
+    island seams (the iter-3 lesson). De-light + region-flatten happen pre-bake in the
+    coherent SOURCE space (`cartoonize_source_copy`). `ao`/`cavity` are unused (kept for
+    signature compatibility)."""
     p = params
-    cf = np.clip((colourfulness(rgb) - 0.04) / (0.18 - 0.04), 0.0, 1.0)
-    eff_sat = (1.0 - cf) * p["mono_saturation"] + cf * p["saturation"]
-    print(f"lofi.cartoonize: chroma={colourfulness(rgb):.3f} cf={cf:.2f} "
-          f"eff_sat={eff_sat:.2f} delit={ao is not None}")
+    cf = float(np.clip((colourfulness(rgb) - 0.04) / (0.18 - 0.04), 0.0, 1.0))
+    # Saturation curve over colourfulness cf:
+    #   mono (cf~0)         -> mono_saturation (desaturate: kill amplified false tints)
+    #   muted-colour (~0.5) -> peak boost (punchy cartoon colour)
+    #   already-vivid (~1)  -> ~1.0 (NEUTRAL): boosting a vivid, warm subject pushes tones
+    #                          into false reds the palette then snaps into blotches.
+    t = min(cf / 0.45, 1.0)
+    ss = t * t * (3.0 - 2.0 * t)                              # smoothstep 0 -> 1 by cf=0.45
+    boost = (p["saturation"] - 1.0) * 4.0 * cf * (1.0 - cf)   # hump: 0 at cf 0/1, peak at 0.5
+    eff_sat = p["mono_saturation"] + (1.0 - p["mono_saturation"]) * ss + boost
+    print(f"lofi.cartoonize: chroma={colourfulness(rgb):.3f} cf={cf:.2f} eff_sat={eff_sat:.2f}")
 
-    rgb = delight(rgb, ao, p)             # flat intrinsic albedo (no baked shadow)
     rgb = boost_saturation_contrast(rgb, sat=eff_sat, contrast=p["contrast"])
-
-    # flat intrinsic regions: merge shaded-vs-lit variation of one surface into one
-    # colour (skin -> ~one colour), then quantize tone. region_flatten scales the merge.
-    rf = float(p.get("region_flatten", 0.5))
-    if rf > 0.0:
-        rgb = guided_smooth(rgb, sigma=3.0, eps=0.05 * (1.0 - rf) + 0.004,
-                            iters=max(1, int(round(rf * 3))))
     if p["posterize_levels"]:
         rgb = posterize_value(rgb, p["posterize_levels"])     # hue-preserving tone steps
 
@@ -302,10 +312,16 @@ def cartoonize_source_copy(image, params, temp):
     if max(w, h) > res:
         copy.scale(res, res)
     a = _read_rgba(copy)
-    a[:, :, :3] = cartoonize_structure(a[:, :, :3], params)
+    # ABSTRACT first (guided smoothing denoises into flat cells), THEN de-light the smooth
+    # result. Order matters: de-lighting raw photo texture divides by a luma low-pass and
+    # amplifies fine texture noise in darker areas into mottle (which the palette then snaps
+    # into colour blotches); de-lighting the already-smoothed albedo has no noise to amplify.
+    # Both run in the COHERENT source space, pre-bake, so nothing bleeds across atlas seams.
+    rgb = cartoonize_structure(a[:, :, :3], params)
+    a[:, :, :3] = delight(rgb, None, params)
     copy.pixels.foreach_set(a.ravel())
     copy.update()
-    print(f"lofi.cartoonize: source '{image.name}' -> coherent cartoon {copy.size[0]}px")
+    print(f"lofi.cartoonize: source '{image.name}' -> de-lit coherent cartoon {copy.size[0]}px")
     return copy
 
 

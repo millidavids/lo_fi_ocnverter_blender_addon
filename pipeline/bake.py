@@ -171,16 +171,9 @@ def run(hipoly, lopoly, settings, context, colour, old_uv, new_uv, temp):
         return {"albedo": albedo, "ao": None, "cavity": None, "res": bake_res,
                 "structure_cartoonized": False}
 
-    # Cartoonize path (iter-6): bake AO hi->lo — it feeds the DE-LIGHT in grade_finish
-    # (divide the baked shading back OUT of the albedo). No cavity bake anymore.
-    ao = None
-    if getattr(settings, "bake_shading", True):
-        ao = bpy.data.images.new("lofi_ao", bake_res, bake_res, alpha=False)
-        temp.images.append(ao)
-        tgt_node.image = ao
-        context.scene.cycles.samples = 16
-        bpy.ops.object.bake(type="AO")
-    return {"albedo": albedo, "ao": ao, "cavity": None, "res": bake_res,
+    # Cartoonize path (iter-6): de-light happens PRE-bake in the coherent source space
+    # (cartoonize.cartoonize_source_copy), so no aux AO/cavity bake is needed here.
+    return {"albedo": albedo, "ao": None, "cavity": None, "res": bake_res,
             "structure_cartoonized": structure_cartoonized}
 
 

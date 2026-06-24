@@ -148,7 +148,7 @@ def test_delight_removes_low_freq_shading():
     p["delight_strength"] = 1.0
     p["retinex_sigma"] = 10.0
     H = W = 128
-    ramp = np.repeat(np.linspace(0.4, 1.0, W, dtype=np.float32)[None, :], H, axis=0)
+    ramp = np.repeat(np.linspace(0.15, 1.0, W, dtype=np.float32)[None, :], H, axis=0)
     lin = np.full((H, W, 3), (0.5, 0.2, 0.2), np.float32) * ramp[:, :, None]
     ao = ct._linear_to_srgb(np.full((H, W), 0.8, np.float32))    # flat AO -> mean-1 no-op
     out = ct._srgb_to_linear(ct.delight(ct._linear_to_srgb(lin), ao, p))
@@ -193,11 +193,27 @@ def test_delight_ao_divide_lifts_occlusion():
     assert patch_out > 1.8 * patch_in, (patch_out, patch_in)   # occlusion lifted toward 1
 
 
-def test_delight_noop_without_ao():
+def test_delight_retinex_without_ao():
+    # De-light runs in source space with NO AO (Retinex luma flatten only) -> it still
+    # removes a low-frequency shading ramp on a single-colour patch.
     p = ct.params_from_settings(object())
+    p["delight_strength"] = 1.0
+    p["retinex_sigma"] = 10.0
+    H = W = 128
+    ramp = np.repeat(np.linspace(0.15, 1.0, W, dtype=np.float32)[None, :], H, axis=0)
+    lin = np.full((H, W, 3), (0.5, 0.2, 0.2), np.float32) * ramp[:, :, None]
+    out = ct._srgb_to_linear(ct.delight(ct._linear_to_srgb(lin), None, p))
+    sl = slice(24, H - 24)
+    luma_in = (lin[:, sl] * ct._LUMA).sum(2).mean(0)
+    luma_out = (out[:, sl] * ct._LUMA).sum(2).mean(0)
+    assert luma_out.std() < 0.3 * luma_in.std(), (luma_out.std(), luma_in.std())
+
+
+def test_delight_strength_zero_is_noop():
+    p = ct.params_from_settings(object())
+    p["delight_strength"] = 0.0
     rgb = np.clip(0.5 + 0.1 * np.random.RandomState(7).randn(16, 16, 3), 0, 1).astype(np.float32)
-    out = ct.delight(rgb, None, p)                   # vertex/solid path: no AO -> no-op
-    assert np.array_equal(out, rgb)
+    assert np.array_equal(ct.delight(rgb, None, p), rgb)
 
 
 if __name__ == "__main__":
