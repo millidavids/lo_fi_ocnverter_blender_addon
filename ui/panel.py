@@ -64,6 +64,12 @@ class LOFI_PT_panel(bpy.types.Panel):
         if s.do_normalize:
             col.prop(s, "keep_original_size")
         col.prop(s, "do_pixelate")
+        if s.do_pixelate:
+            col.prop(s, "palette_mode")
+            if s.palette_mode == "CUSTOM":
+                col.prop(s, "custom_palette_path")
+            elif s.palette_mode != "AUTO":
+                col.label(text="Fixed palette — colour count ignored", icon="COLOR")
         col.prop(s, "bake_shading")
         if s.bake_shading:
             col.prop(s, "shading_strength")
@@ -75,6 +81,7 @@ class LOFI_PT_panel(bpy.types.Panel):
             box.prop(s, "supersample")
             box.prop(s, "delight_strength")
             box.prop(s, "region_flatten")
+            box.prop(s, "l0_strength")
             box.prop(s, "saturation")
             box.prop(s, "contrast")
             box.prop(s, "posterize_levels")

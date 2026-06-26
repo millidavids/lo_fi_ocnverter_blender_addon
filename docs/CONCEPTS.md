@@ -179,11 +179,26 @@ few forms:
   it smooths away fine noise *inside* a region but keeps the hard boundaries *between* regions.
   Run it and a noisy photographed cheek becomes a single flat "cartoon cell," while the edge
   between cheek and beak stays crisp. (This is image-abstraction à la Winnemöller 2006.)
+- **L0 flatten (true flattening — iteration 7).** A guided filter *softens* gradients but
+  every region is still a gentle gradient — it denoises a photo, it doesn't make it read as a
+  cartoon. **L0 gradient minimization** (Xu et al. 2011) drives the *number of non-zero
+  gradients* down, snapping each region to a single flat value with a crisp step at its edge —
+  genuinely flat cartoon cells, not a smoothed photo. It's the single biggest lever on the
+  "cartoon" read. We solve it in the Fourier domain (it's pure numpy: FFTs + a per-pixel
+  threshold) and run it **only in the coherent source space** (a strong flattener on the packed
+  atlas would bleed colour across island seams — §4). One `Flatten (L0)` slider sets its
+  strength.
 - **Region flatten.** Same idea, dialled up: merge a whole shaded-vs-lit surface into one flat
   colour ("skin → one colour"), so it reads as cartoon, not photo.
 - **Posterize.** Reduce the number of brightness *steps* (like a poster print) — smooth
   gradients become a few flat bands. We posterize *hue-preservingly* (quantize brightness only)
   so neutral greys don't band into false colours.
+- **Colour punch in OKLCh (iteration 7).** Saturation + contrast used to be scaled in
+  sRGB/luma, which drifts hue (the classic blue→purple shift) and can clip to false reds. We now
+  do it in **OKLCh** — the cylindrical form of the perceptually-uniform **OKLab** space — where
+  *lightness, chroma and hue are independent*: we scale chroma (saturation) and lightness about
+  a perceptual mid (contrast) with the **hue held fixed**, then pull any over-bright colour back
+  into the sRGB gamut by *reducing chroma* (not by clamping channels, which would distort hue).
 
 ### 2.6 Palettize (quantize) — few colours
 
@@ -193,6 +208,19 @@ spread and split it at the median, until you have N boxes; each box's average is
 entry. Then every pixel is snapped to its **nearest** palette colour. (Snapping to *nearest*
 rather than the box average matters — it's what stops a belly-orange pixel from grabbing the
 beak's red; see §4.)
+
+**Two iteration-7 upgrades:**
+- **Quantize in OKLab, not RGB.** Equal *RGB* distances don't look equally different, so an
+  RGB median-cut makes muddy palettes and RGB nearest-match assigns the wrong-hue swatch. Doing
+  both the split *and* the nearest-match in **OKLab** (perceptually uniform) gives cleaner,
+  better-separated palettes — the maths is two matrices + a cube root, still pure numpy.
+- **Curated / custom palette snapping.** Instead of generating a palette *from* the scan, you
+  can **snap** every pixel (matched in OKLab) to a fixed, hand-designed palette — built-in
+  **PICO-8 / DawnBringer-16 / DawnBringer-32**, or your own **`.hex` / `.pal` / `.gpl`** file.
+  A curated palette bakes in deliberate colour harmony and gives a whole project one consistent,
+  art-directed identity — exactly the retro look auto-generation only approximates. (A `Palette`
+  dropdown picks the mode; deliberately **no dithering** — it fights flat-cartoon + the
+  nearest-neighbour-filtered texture, turning into per-texel speckle.)
 
 ### 2.7 Supersample + DPID downscale — keep detail when shrinking the texture
 
@@ -294,8 +322,11 @@ If you want to go deeper, these are the actual named techniques we lean on. Sear
 | Hi→lo baking | **Selected-to-active texture baking / surface transfer**, with a **cage** |
 | UV unwrap | **UV mapping / mesh parameterization**; Blender **Smart UV Project** |
 | Abstraction / flatten | **Guided filter** (He et al.); **image abstraction** (Winnemöller et al. 2006) |
+| True flatten (iter-7) | **L0 gradient minimization** (Xu et al. 2011) — FFT half-quadratic splitting |
 | (earlier) ink outlines | **XDoG** — eXtended Difference-of-Gaussians (Winnemöller 2011) |
-| Palettize | **Median-cut colour quantization** (Heckbert 1982) + nearest-colour mapping |
+| Colour punch (iter-7) | **OKLab / OKLCh** perceptual space (Ottosson 2020) — hue-stable sat/contrast + gamut clip |
+| Palettize | **Median-cut colour quantization** (Heckbert 1982) + nearest-colour mapping, **in OKLab** (iter-7) |
+| Curated palettes (iter-7) | Fixed/snap palettes — **PICO-8**, **DawnBringer-16/32**; `.hex`/`.pal`/`.gpl` |
 | Shrink-but-keep-detail | **DPID — Detail-Preserving Image Downscaling** (Weber et al. 2016) |
 | De-light | **Intrinsic image decomposition / albedo recovery**; **Retinex theory** (Land & McCann); **Ambient Occlusion** |
 | Material model | **PBR** (Physically-Based Rendering) + **Principled BSDF**; glTF **`KHR_materials_unlit`** |
@@ -317,6 +348,11 @@ If you want to go deeper, these are the actual named techniques we lean on. Sear
 - **DPID** — detail-preserving image downscaling.
 - **EMIT bake** — a bake that copies raw surface colour with no lighting math.
 - **Guided filter** — an edge-preserving blur (smooths regions, keeps boundaries).
+- **L0 flatten** — gradient-count minimization; snaps regions to flat values with crisp edges.
+- **OKLab / OKLCh** — a perceptually-uniform colour space (Cartesian / cylindrical); equal
+  distances look equally different, and L/chroma/hue are independent. Used for quantizing and
+  for hue-stable saturation/contrast.
+- **Curated palette** — a fixed, hand-designed colour set (PICO-8, DawnBringer) we *snap* to.
 - **glTF / GLB** — the standard 3D interchange format (GLB = its single-file binary form).
 - **Lit vs Unlit** — lit reacts to scene lights (PBR); unlit shows the texture as-is.
 - **Material** — the surface look: texture(s) + how they react to light. *Not* the shape.

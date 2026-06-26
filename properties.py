@@ -44,11 +44,11 @@ def _slider_update(self, context):
 # snaps into blotches. Near-monochrome subjects desaturate via the mono path regardless.
 _CARTOON_PRESETS = {
     "OFF": dict(do_cartoonize=False),
-    "SUBTLE": dict(do_cartoonize=True, smooth_iters=1, posterize_levels=0,
+    "SUBTLE": dict(do_cartoonize=True, smooth_iters=1, posterize_levels=0, l0_strength=0.25,
                    saturation=1.08, contrast=1.1, delight_strength=0.6, region_flatten=0.3),
-    "CEL": dict(do_cartoonize=True, smooth_iters=2, posterize_levels=8,
+    "CEL": dict(do_cartoonize=True, smooth_iters=2, posterize_levels=8, l0_strength=0.5,
                 saturation=1.15, contrast=1.2, delight_strength=0.8, region_flatten=0.5),
-    "HEAVY": dict(do_cartoonize=True, smooth_iters=2, posterize_levels=6,
+    "HEAVY": dict(do_cartoonize=True, smooth_iters=2, posterize_levels=6, l0_strength=0.7,
                   saturation=1.25, contrast=1.2, delight_strength=0.9, region_flatten=0.7),
 }
 
@@ -112,8 +112,30 @@ class LoFiSettings(bpy.types.PropertyGroup):
     )
     palette_colors: bpy.props.IntProperty(
         name="Palette Colors",
-        description="Number of colours to quantize the texture down to",
+        description="Number of colours to quantize the texture down to (Auto palette only; "
+                    "fixed palettes use their own colour count)",
         default=64, min=2, soft_min=16, soft_max=256, max=256,
+    )
+    palette_mode: bpy.props.EnumProperty(
+        name="Palette",
+        description="Where the colour palette comes from. Auto generates one FROM the image "
+                    "(median-cut in perceptual OKLab, honouring the colour count); the "
+                    "others SNAP every pixel to a fixed curated/custom palette. All modes "
+                    "require Pixelate / Palette = ON",
+        items=[
+            ("AUTO", "Auto (from image)", "Median-cut a palette out of the texture (OKLab)"),
+            ("PICO8", "PICO-8 (16)", "Snap to the PICO-8 16-colour palette"),
+            ("DB16", "DawnBringer 16", "Snap to the DawnBringer 16 palette"),
+            ("DB32", "DawnBringer 32", "Snap to the DawnBringer 32 palette"),
+            ("CUSTOM", "Custom file…", "Snap to a .hex / .pal / .gpl palette file"),
+        ],
+        default="AUTO",
+    )
+    custom_palette_path: bpy.props.StringProperty(
+        name="Palette File",
+        description="A .hex (Lospec), .pal (JASC) or .gpl (GIMP) palette file to snap to "
+                    "when Palette = Custom",
+        subtype="FILE_PATH", default="",
     )
     target_size: bpy.props.FloatProperty(
         name="Target Size",
@@ -235,6 +257,14 @@ class LoFiSettings(bpy.types.PropertyGroup):
         name="Flatten Regions",
         description="Merge shaded-vs-lit variation of one surface into a single flat "
                     "colour (skin -> ~one colour) before posterizing",
+        default=0.5, min=0.0, max=1.0,
+    )
+    l0_strength: bpy.props.FloatProperty(
+        name="Flatten (L0)",
+        description="Collapse the surface into genuinely FLAT cartoon cells with crisp "
+                    "edges (L0 gradient minimization, run in coherent source space). "
+                    "0 = off (just edge-preserving smoothing); higher = fewer, flatter "
+                    "regions. The biggest lever on the 'cartoon' read",
         default=0.5, min=0.0, max=1.0,
     )
     dpid_lambda: bpy.props.FloatProperty(

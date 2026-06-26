@@ -216,6 +216,73 @@ def test_delight_strength_zero_is_noop():
     assert np.array_equal(ct.delight(rgb, None, p), rgb)
 
 
+# --- L0 flatten (iter-7) --------------------------------------------------- #
+def test_l0_preserves_step_and_kills_noise():
+    rng = np.random.RandomState(3)
+    img = np.zeros((64, 64, 3), np.float32)
+    img[:, 32:, :] = 1.0
+    noisy = np.clip(img + rng.normal(0, 0.05, img.shape), 0, 1).astype(np.float32)
+    out = ct.l0_smooth(noisy, lam=0.02)
+    assert out[:, :30].mean() < 0.1 and out[:, 34:].mean() > 0.9      # step contrast kept
+    assert out[:, :30].var() < 0.2 * noisy[:, :30].var()             # flat side flattened
+
+
+def test_l0_reduces_gradient_transitions():
+    rng = np.random.RandomState(4)
+    img = np.zeros((48, 48, 3), np.float32)
+    img[:, 24:, :] = 0.8
+    noisy = np.clip(img + rng.normal(0, 0.06, img.shape), 0, 1).astype(np.float32)
+
+    def trans(a):
+        return int((np.abs(np.diff(a[:, :, 0], axis=1)) > 0.02).sum())
+    assert trans(ct.l0_smooth(noisy, lam=0.02)) < 0.25 * trans(noisy)
+
+
+def test_l0_is_not_posterize_on_ramp():
+    # L0 penalizes the COUNT of gradients, not their magnitude: a clean ramp keeps many
+    # levels (unlike posterize). Guards against mis-asserting "few unique levels".
+    ramp = np.repeat(np.linspace(0, 1, 64, dtype=np.float32)[None, :], 64, axis=0)
+    out = ct.l0_smooth(np.repeat(ramp[:, :, None], 3, axis=2), lam=0.02)
+    assert len(np.unique(np.round(out[..., 0], 3))) > 12
+
+
+def test_l0_lambda_zero_skips():
+    assert ct._l0_lambda(0.0) is None
+    assert ct._l0_lambda(0.5) is not None and ct._l0_lambda(0.5) > 0
+
+
+# --- OKLCh grading (iter-7) ------------------------------------------------ #
+def _oklch(rgb):
+    return ct.colour.srgb_to_oklch(rgb)
+
+
+def test_oklch_grade_boosts_chroma_preserves_hue():
+    rng = np.random.RandomState(8)
+    rgb = np.clip(0.3 + 0.4 * rng.rand(32, 32, 3), 0, 1).astype(np.float32)
+    out = ct.boost_saturation_contrast(rgb, sat=1.4, contrast=1.0)
+    ci, co = _oklch(rgb), _oklch(out)
+    assert co[..., 1].mean() > ci[..., 1].mean()                     # chroma up
+    mask = ci[..., 1] > 0.05
+    dh = np.abs(np.arctan2(np.sin(co[..., 2] - ci[..., 2]),
+                           np.cos(co[..., 2] - ci[..., 2])))
+    assert float(dh[mask].mean()) < 0.05                             # hue preserved
+
+
+def test_oklch_grade_monochrome_stays_grey():
+    grey = np.full((16, 16, 3), 0.5, np.float32)
+    out = ct.boost_saturation_contrast(grey, sat=2.0, contrast=1.0)
+    assert np.abs(out[..., 0] - out[..., 1]).max() < 1e-2            # no false colour
+    assert np.abs(out[..., 1] - out[..., 2]).max() < 1e-2
+
+
+def test_oklch_contrast_does_not_darken_midgrey():
+    # Pivoting contrast on mean-L (mid-grey sits at L=0.598, NOT 0.5) must leave a uniform
+    # mid-grey field unchanged -- pivoting on 0.5 would darken it.
+    grey = np.full((8, 8, 3), 0.5, np.float32)
+    out = ct.boost_saturation_contrast(grey, sat=1.0, contrast=1.5)
+    assert np.allclose(out, 0.5, atol=2e-2)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

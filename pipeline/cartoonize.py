@@ -22,18 +22,25 @@ dependency and are unit-tested in tests/test_cartoonize.py; only `run` touches b
 
 import numpy as np
 
+# Shared colour-space maths (OKLab/OKLCh). Normally a package import; when this file is
+# exec_module'd by path in the standalone unit tests there's no package, so fall back to a
+# direct path load (registered in sys.modules so cartoonize + pixelate share one instance).
+try:
+    from . import colour
+except ImportError:
+    import importlib.util as _il, os as _os, sys as _sys
+    _cp = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "colour.py")
+    _cs = _il.spec_from_file_location("lofi_colour", _cp)
+    colour = _il.module_from_spec(_cs)
+    _sys.modules["lofi_colour"] = colour
+    _cs.loader.exec_module(colour)
+
 _LUMA = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
-
-def _srgb_to_linear(c):
-    c = np.clip(c, 0.0, 1.0)
-    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4).astype(np.float32)
-
-
-def _linear_to_srgb(c):
-    c = np.clip(c, 0.0, 1.0)
-    return np.where(c <= 0.0031308, c * 12.92,
-                    1.055 * (c ** (1.0 / 2.4)) - 0.055).astype(np.float32)
+# sRGB <-> linear live canonically in colour.py now; keep the private names as aliases so
+# `delight` (and anything else here) keeps working without duplicating the transfer curve.
+_srgb_to_linear = colour.srgb_to_linear
+_linear_to_srgb = colour.linear_to_srgb
 
 
 # --------------------------------------------------------------------------- #
@@ -85,11 +92,75 @@ def guided_smooth(rgb, sigma=2.0, eps=0.01, iters=1):
     return np.clip(out, 0.0, 1.0)
 
 
+def _psf2otf(psf, shape):
+    """Optical-transfer function of a small PSF for an FFT-domain solve: place the PSF,
+    circularly shift its centre to (0,0), then fft2 (matches MATLAB psf2otf)."""
+    psf = np.asarray(psf, dtype=np.float64)
+    ph, pw = psf.shape
+    out = np.zeros(shape, dtype=np.float64)
+    out[:ph, :pw] = psf
+    out = np.roll(out, -(ph // 2), axis=0)
+    out = np.roll(out, -(pw // 2), axis=1)
+    return np.fft.fft2(out)
+
+
+def l0_smooth(rgb, lam, kappa=2.0, beta_max=1e5, pad=8):
+    """L0 gradient-minimization smoothing (Xu et al. 2011): drives small gradients to
+    EXACTLY zero, so regions go genuinely FLAT with crisp step edges -- the cartoon
+    "flatten" a guided filter (which only softens gradients) can't give.
+
+    Solved by half-quadratic splitting in the Fourier domain: alternate a hard-threshold
+    on the gradients (keep an edge only where the joint cross-channel gradient energy
+    exceeds lam/beta) with a least-squares image update; beta climbs *kappa each pass until
+    beta_max (~8-15 passes). `lam` is the smoothing strength (larger = flatter/fewer edges).
+
+    The FFT solve is periodic; we reflect-PAD by `pad` first and crop after so wrap-around
+    can't bleed an opposite edge into a real border. Pure numpy. Returns float32 in [0,1].
+    Run this ONLY in coherent source space (pre-bake) -- it's a strong spatial op."""
+    S = np.pad(rgb.astype(np.float64), ((pad, pad), (pad, pad), (0, 0)), mode="reflect")
+    H, W, _ = S.shape
+    otfx = _psf2otf([[1, -1]], (H, W))
+    otfy = _psf2otf([[1], [-1]], (H, W))
+    Normin1 = np.fft.fft2(S, axes=(0, 1))
+    Den2 = (np.abs(otfx) ** 2 + np.abs(otfy) ** 2)[:, :, None]
+    beta = 2.0 * lam
+    while beta < beta_max:
+        Den = 1.0 + beta * Den2
+        # gradients with circular boundary (consistent with the periodic FFT solve)
+        h = np.concatenate([np.diff(S, axis=1), S[:, :1, :] - S[:, -1:, :]], axis=1)
+        v = np.concatenate([np.diff(S, axis=0), S[:1, :, :] - S[-1:, :, :]], axis=0)
+        kill = (h ** 2 + v ** 2).sum(axis=2) < lam / beta     # joint across channels
+        h[kill] = 0.0
+        v[kill] = 0.0
+        n2 = np.concatenate([h[:, -1:, :] - h[:, :1, :], -np.diff(h, axis=1)], axis=1)
+        n2 += np.concatenate([v[-1:, :, :] - v[:1, :, :], -np.diff(v, axis=0)], axis=0)
+        FS = (Normin1 + beta * np.fft.fft2(n2, axes=(0, 1))) / Den
+        S = np.real(np.fft.ifft2(FS, axes=(0, 1)))
+        beta *= kappa
+    return np.clip(S[pad:-pad, pad:-pad], 0.0, 1.0).astype(np.float32)
+
+
+def _l0_lambda(strength):
+    """Map a 0..1 `l0_strength` slider to an L0 lambda. 0 -> None (skip entirely)."""
+    s = float(strength)
+    if s <= 0.0:
+        return None
+    return 0.002 + 0.04 * s * s          # gentle->strong flatten
+
+
 def boost_saturation_contrast(rgb, sat=1.4, contrast=1.25):
-    luma = (rgb * _LUMA).sum(axis=2, keepdims=True)
-    out = luma + (rgb - luma) * sat          # push away from grey
-    out = (out - 0.5) * contrast + 0.5        # contrast about mid
-    return np.clip(out, 0.0, 1.0)
+    """Punch cartoon colour PERCEPTUALLY, in OKLCh: scale chroma for saturation and scale
+    lightness about a perceptual mid for contrast, then pull anything that overshoots the
+    sRGB gamut back by reducing chroma (hue preserved). Working in OKLCh (not sRGB-luma)
+    keeps the perceived HUE fixed -- no blue->purple drift, no false reds from a luma boost
+    -- and the gamut clip avoids the per-channel clamping that would distort hue."""
+    lch = colour.srgb_to_oklch(rgb)
+    L, C, h = lch[..., 0], lch[..., 1], lch[..., 2]
+    C = C * sat
+    pivot = float(L.mean()) if L.size else colour.MID_GREY_L   # adaptive; never 0.5
+    L = (L - pivot) * contrast + pivot
+    graded = colour.gamut_clip_oklch(np.stack([L, C, h], axis=-1))
+    return np.clip(colour.oklch_to_srgb(graded), 0.0, 1.0)
 
 
 def posterize(rgb, levels):
@@ -283,6 +354,8 @@ def params_from_settings(settings):
         "delight_strength": g("delight_strength", 0.8),
         "retinex_sigma": g("retinex_sigma", 12.0),
         "region_flatten": g("region_flatten", 0.5),
+        # L0 flatten (iter-7): genuinely-flat cartoon cells, source space only. 0 = off.
+        "l0_strength": g("l0_strength", 0.0),
         # chroma-adaptive: monochrome subjects desaturate (kill false colour from
         # amplifying faint tints); colourful subjects get the full punch.
         "mono_saturation": g("mono_saturation", 0.6),
@@ -312,12 +385,18 @@ def cartoonize_source_copy(image, params, temp):
     if max(w, h) > res:
         copy.scale(res, res)
     a = _read_rgba(copy)
-    # ABSTRACT first (guided smoothing denoises into flat cells), THEN de-light the smooth
-    # result. Order matters: de-lighting raw photo texture divides by a luma low-pass and
-    # amplifies fine texture noise in darker areas into mottle (which the palette then snaps
-    # into colour blotches); de-lighting the already-smoothed albedo has no noise to amplify.
-    # Both run in the COHERENT source space, pre-bake, so nothing bleeds across atlas seams.
+    # ABSTRACT first (guided smoothing denoises into flat cells), optionally FLATTEN hard
+    # with L0 (drives small gradients to zero -> genuinely flat cartoon cells with crisp
+    # edges), THEN de-light the smooth result. Order matters: de-lighting raw photo texture
+    # divides by a luma low-pass and amplifies fine texture noise in darker areas into mottle
+    # (which the palette then snaps into colour blotches); de-lighting the already-flattened
+    # albedo has no noise to amplify. All run in the COHERENT source space, pre-bake, so
+    # nothing bleeds across atlas seams (L0 especially must never touch the packed atlas).
     rgb = cartoonize_structure(a[:, :, :3], params)
+    lam = _l0_lambda(params.get("l0_strength", 0.0))
+    if lam is not None:
+        rgb = l0_smooth(rgb, lam)
+        print(f"lofi.cartoonize: L0 flatten lam={lam:.4f} (strength {params['l0_strength']})")
     a[:, :, :3] = delight(rgb, None, params)
     copy.pixels.foreach_set(a.ravel())
     copy.update()

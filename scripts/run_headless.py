@@ -82,6 +82,10 @@ def main():
     p.add_argument("--delight", type=float, help="de-light strength 0..1")
     p.add_argument("--posterize", type=int)
     p.add_argument("--supersample", type=int)
+    p.add_argument("--l0", type=float, help="L0 flatten strength 0..1 (0=off)")
+    p.add_argument("--palette-mode", choices=["AUTO", "PICO8", "DB16", "DB32", "CUSTOM"],
+                   help="palette source (default AUTO = generate from image)")
+    p.add_argument("--custom-palette", help=".hex/.pal/.gpl file for --palette-mode CUSTOM")
     p.add_argument("--render-geo")
     p.add_argument("--render-tex")
     args = p.parse_args(argv)
@@ -133,6 +137,12 @@ def main():
         s.posterize_levels = args.posterize
     if args.supersample is not None:
         s.supersample = args.supersample
+    if args.l0 is not None:
+        s.l0_strength = args.l0
+    if args.palette_mode is not None:
+        s.palette_mode = args.palette_mode
+    if args.custom_palette is not None:
+        s.custom_palette_path = args.custom_palette
 
     convert_mod = importlib.import_module(addon.__name__ + ".pipeline.convert")
     result = convert_mod.convert(bpy.context, mesh, s)
